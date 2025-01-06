@@ -1,3 +1,4 @@
+#include "log.h"
 #include "ost.h"
 
 #include <stdio.h>
@@ -85,7 +86,7 @@ static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
   conn_t *conn = c;
   // TODO: set valid len
   strlcpy(conn->obj.id, frame->var, 32);
-  printf("Set connection objid: %s\n", conn->obj.id);
+  LOG_INFO("[%i]Set connection objid: %s\n", conn->fd, conn->obj.id);
   //TODO: validate incoming frame and objid
   conn->obj.fd = open(conn->obj.id, O_RDWR | O_CREAT , 0664);
   if (conn->obj.fd < 0) {
@@ -96,13 +97,13 @@ static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
 }
 
 void process_read(int fd, int res, io_request_t *rreq) {
-  printf("[%d] read: %.*s\n", fd, res, rreq->iobuf);
+  LOG_DEBUG("[%d] read: %.*s\n", fd, res, rreq->iobuf);
   conn_t *conn = conns[fd];
 
   /* try to cast raw stream bytes into our minimal structs */
   proto_basic_frame_t *mframe = malloc(sizeof(proto_basic_frame_t));
   memcpy(mframe, rreq->iobuf, sizeof(proto_basic_frame_t));
-  printf("cmd: %i\n", mframe->cmd);
+  LOG_DEBUG("cmd: %i\n", mframe->cmd);
 
   switch (mframe->cmd)
   {
@@ -114,7 +115,7 @@ void process_read(int fd, int res, io_request_t *rreq) {
   }
   case CMD_READ: {
     if (res < sizeof(proto_io_frame_t)) {
-      printf("Unknown proto command, too small: %.*s", res, rreq->iobuf);
+      LOG_INFO("Unknown proto command, too small: %.*s", res, rreq->iobuf);
       break;
     }
     proto_io_frame_t *frame = malloc(sizeof(proto_io_frame_t));
@@ -124,7 +125,7 @@ void process_read(int fd, int res, io_request_t *rreq) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
     io_request_t *nreq = block_io_req_new(IO_KIND_READ, fd, frame->len);
     // TODO: obj.fd may not exist yet, validate
-    printf("[%i]Let's read blocks! block_fd:%i offset:%li len:%i\n", fd, conn->obj.fd, frame->offset, frame->len);
+    LOG_DEBUG("[%i]Let's read blocks! block_fd:%i offset:%li len:%i\n", fd, conn->obj.fd, frame->offset, frame->len);
     io_uring_prep_readv(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset);
     io_uring_sqe_set_data(sqe, nreq);
     int err = io_uring_submit(&ring);
@@ -136,7 +137,7 @@ void process_read(int fd, int res, io_request_t *rreq) {
   }
   case CMD_WRITE: {
     if (res < sizeof(proto_io_frame_t)) {
-      printf("Unknown proto command, too small: %.*s", res, rreq->iobuf);
+      LOG_INFO("Unknown proto command, too small: %.*s", res, rreq->iobuf);
       break;
     }
 
@@ -145,7 +146,7 @@ void process_read(int fd, int res, io_request_t *rreq) {
 
    // TODO: data may be in next iterations of TCP stream, so we need a queue to fill for each object
     if (res < frame->len + sizeof(proto_io_w_frame_t)) {
-      printf("Write: data should be with command frame, TBD better stream handling. Waited:%li, actual:%i",
+      LOG_DEBUG("Write: data should be with command frame, TBD better stream handling. Waited:%li, actual:%i",
              frame->len + sizeof(proto_io_w_frame_t),res);
 
       prep_and_send_resp_frame(fd, mframe->cmd, -1001);
@@ -157,7 +158,7 @@ void process_read(int fd, int res, io_request_t *rreq) {
     io_request_t *nreq = block_io_req_new(IO_KIND_WRITE, fd, frame->len);
     nreq->iovecs[0].iov_base = rreq->iobuf + sizeof(proto_io_w_frame_t);
     // TODO: obj.fd may not exist yet, validate
-    printf("[%i]Let's write blocks! block_fd:%i offset:%li len:%i, sync:%i data:\n%.*s\n",
+    LOG_DEBUG("[%i]Let's write blocks! block_fd:%i offset:%li len:%i, sync:%i data:\n%.*s\n",
            fd, conn->obj.fd, frame->offset, frame->len, frame->sync, frame->len, rreq->iobuf + sizeof(proto_io_w_frame_t));
 
     if (frame->sync) {
@@ -175,7 +176,7 @@ void process_read(int fd, int res, io_request_t *rreq) {
     break;
   }
   default:
-    printf("Unknown proto command: %i", mframe->cmd);
+    LOG_INFO("Unknown proto command: %i", mframe->cmd);
     break;
   }
 
@@ -194,7 +195,7 @@ void process_read(int fd, int res, io_request_t *rreq) {
 }
 
 void io_process_read(int fd, int res, io_request_t *rreq) {
-  printf("[%d] block_read: res:%i len:%li\n", fd, res, rreq->iovecs[0].iov_len);
+  LOG_DEBUG("[%d] block_read: res:%i len:%li\n", fd, res, rreq->iovecs[0].iov_len);
   //conn_t *conn = conns[fd];
 
   proto_resp_frame_t *rframe = prep_resp_frame(CMD_READ, res);
@@ -214,7 +215,7 @@ void io_process_read(int fd, int res, io_request_t *rreq) {
 }
 
 void io_process_write(int fd, int res, io_request_t *rreq) {
-  printf("[%d] block_write: res:%i\n", fd, res);
+  LOG_DEBUG("[%d] block_write: res:%i\n", fd, res);
 
   prep_and_send_resp_frame(fd, CMD_WRITE, res);
 }
@@ -275,7 +276,7 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
-  printf("listening on port %d\n", port);
+  LOG_DEBUG("listening on port %d\n", port);
 
   memset(&conns, 0, sizeof(conns));
 
@@ -322,13 +323,13 @@ int main(int argc, char **argv) {
         /* maybe it failed? */
         if (res < 0) {
           /* note negation of return value in place of errno */
-          fprintf(stderr, "accept: %s\n", strerror(-res));
+          FLOG_INFO(stderr, "accept: %s\n", strerror(-res));
         }
 
         else {
           /* hello! client address is in the req object, because that's what we
            * pointed the request to in io_uring_prep_accept */
-          printf("[%d] connect from %s:%d\n", res, inet_ntoa(areq->addr.sin_addr), ntohs(areq->addr.sin_port));
+          LOG_INFO("[%d]Connect from %s:%d\n", res, inet_ntoa(areq->addr.sin_addr), ntohs(areq->addr.sin_port));
 
           /* remember our new connection. in a real server, you'd create a
            * connection or user object of some sort, maybe send them a
@@ -362,7 +363,7 @@ int main(int argc, char **argv) {
 
         /* some error, disconnect them */
         if (res < 0) {
-          fprintf(stderr, "readv(%d): %s\n", fd, strerror(-res));
+          FLOG_INFO(stderr, "readv(%d): %s\n", fd, strerror(-res));
 
           /* make a async close request. we use a minimal request object
            * because close has no interesting args or return; we just need a
@@ -380,7 +381,7 @@ int main(int argc, char **argv) {
 
         /* zero read, they gracefully closed the connection */
         else if (res == 0) {
-          printf("[%d] closed\n", fd);
+          LOG_INFO("[%d] closed\n", fd);
 
           /* see error block above, this is the same behaviour */
 
@@ -417,7 +418,7 @@ int main(int argc, char **argv) {
 
         /* failed write, so disconnect them */
         if (res < 0) {
-          fprintf(stderr, "writev(%d): %s\n", fd, strerror(-res));
+          FLOG_INFO(stderr, "writev(%d): %s\n", fd, strerror(-res));
           req_free(req);
 
           /* see read error handling */
@@ -432,7 +433,7 @@ int main(int argc, char **argv) {
         }
 
         else {
-          fprintf(stderr, "[%d] writev success: %i\n", fd, res);
+          FLOG_DEBUG(stderr, "[%d] writev success: %i\n", fd, res);
           /* written successfully, so just free the read req */
           req_free(req);
         }
