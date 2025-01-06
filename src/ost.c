@@ -61,6 +61,25 @@ static io_request_t *block_io_req_new(req_kind event, int fd,  uint16_t len) {
   return req;
 }
 
+proto_resp_frame_t *prep_resp_frame(commands_t cmd, int res) {
+  proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
+  rframe->cmd = cmd;
+  rframe->res = res;
+  return rframe;
+}
+
+void prep_and_send_resp_frame(int fd, commands_t cmd, int res) {
+  proto_resp_frame_t *rframe = prep_resp_frame(cmd, res);
+
+  io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd);
+  wreq->iovecs[0].iov_base = rframe;
+  wreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
+
+  struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+  io_uring_prep_writev(sqe, fd, wreq->iovecs, 1, 0);
+  io_uring_sqe_set_data(sqe, wreq);
+  io_uring_submit(&ring);
+}
 
 static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
   conn_t *conn = c;
@@ -68,7 +87,7 @@ static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
   strlcpy(conn->obj.id, frame->var, 32);
   printf("Set connection objid: %s\n", conn->obj.id);
   //TODO: validate incoming frame and objid
-  conn->obj.fd = open(conn->obj.id, O_RDWR | O_CREAT , 0644);
+  conn->obj.fd = open(conn->obj.id, O_RDWR | O_CREAT , 0664);
   if (conn->obj.fd < 0) {
       perror("open");
       return 1;
@@ -90,33 +109,63 @@ void process_read(int fd, int res, io_request_t *rreq) {
   case CMD_SET_OBJECT: {
     int res = set_conn_params(conn, mframe);
 
-    proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
-    rframe->cmd = mframe->cmd;
-    rframe->res = res;
-
-    io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd);
-    wreq->iovecs[0].iov_base = rframe;
-    wreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
-
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_writev(sqe, fd, wreq->iovecs, 1, 0);
-    io_uring_sqe_set_data(sqe, wreq);
-    io_uring_submit(&ring);
+    prep_and_send_resp_frame(fd, mframe->cmd, res);
     break;
   }
   case CMD_READ: {
     if (res < sizeof(proto_io_frame_t)) {
       printf("Unknown proto command, too small: %.*s", res, rreq->iobuf);
+      break;
     }
     proto_io_frame_t *frame = malloc(sizeof(proto_io_frame_t));
     memcpy(frame, rreq->iobuf, sizeof(proto_io_frame_t));
 
-    /* async read file */
+    /* async read object */
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
     io_request_t *nreq = block_io_req_new(IO_KIND_READ, fd, frame->len);
     // TODO: obj.fd may not exist yet, validate
-    printf("Let's read blocks! fd:%i offset:%li len %i iov_len\n", conn->obj.fd, frame->offset, frame->len);
+    printf("[%i]Let's read blocks! block_fd:%i offset:%li len:%i\n", fd, conn->obj.fd, frame->offset, frame->len);
     io_uring_prep_readv(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset);
+    io_uring_sqe_set_data(sqe, nreq);
+    int err = io_uring_submit(&ring);
+    if (err < 0) {
+        perror("io_uring_submit");
+        exit(1);
+    }
+    break;
+  }
+  case CMD_WRITE: {
+    if (res < sizeof(proto_io_frame_t)) {
+      printf("Unknown proto command, too small: %.*s", res, rreq->iobuf);
+      break;
+    }
+
+    proto_io_w_frame_t *frame = malloc(sizeof(proto_io_w_frame_t));
+    memcpy(frame, rreq->iobuf, sizeof(proto_io_w_frame_t));
+
+   // TODO: data may be in next iterations of TCP stream, so we need a queue to fill for each object
+    if (res < frame->len + sizeof(proto_io_w_frame_t)) {
+      printf("Write: data should be with command frame, TBD better stream handling. Waited:%li, actual:%i",
+             frame->len + sizeof(proto_io_w_frame_t),res);
+
+      prep_and_send_resp_frame(fd, mframe->cmd, -1001);
+      break;
+    }
+
+    /* async write object */
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+    io_request_t *nreq = block_io_req_new(IO_KIND_WRITE, fd, frame->len);
+    nreq->iovecs[0].iov_base = rreq->iobuf + sizeof(proto_io_w_frame_t);
+    // TODO: obj.fd may not exist yet, validate
+    printf("[%i]Let's write blocks! block_fd:%i offset:%li len:%i, data:\n%.*s\n",
+           fd, conn->obj.fd, frame->offset, frame->len, frame->len, rreq->iobuf + sizeof(proto_io_w_frame_t));
+
+    if (frame->sync) {
+      io_uring_prep_writev2(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset, O_SYNC);
+    } else {
+      io_uring_prep_writev(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset);
+    }
+
     io_uring_sqe_set_data(sqe, nreq);
     int err = io_uring_submit(&ring);
     if (err < 0) {
@@ -145,25 +194,29 @@ void process_read(int fd, int res, io_request_t *rreq) {
 }
 
 void io_process_read(int fd, int res, io_request_t *rreq) {
-  printf("[%d] block_read: len:%i %li\n", fd, res, rreq->iovecs[0].iov_len);
+  printf("[%d] block_read: res:%i len:%li\n", fd, res, rreq->iovecs[0].iov_len);
   //conn_t *conn = conns[fd];
 
-    proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
-    rframe->cmd = CMD_READ;
-    rframe->res = res;
+  proto_resp_frame_t *rframe = prep_resp_frame(CMD_READ, res);
 
-    io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd);
+  io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd);
 
-    wreq->iovecs[0].iov_base = rframe;
-    wreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
+  wreq->iovecs[0].iov_base = rframe;
+  wreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
-    wreq->iovecs[1].iov_base = rreq->iovecs[0].iov_base;
-    wreq->iovecs[1].iov_len = rreq->iovecs[0].iov_len;
+  wreq->iovecs[1].iov_base = rreq->iovecs[0].iov_base;
+  wreq->iovecs[1].iov_len = rreq->iovecs[0].iov_len;
 
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-    io_uring_prep_writev(sqe, fd, wreq->iovecs, 2, 0);
-    io_uring_sqe_set_data(sqe, wreq);
-    io_uring_submit(&ring);
+  struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+  io_uring_prep_writev(sqe, fd, wreq->iovecs, 2, 0);
+  io_uring_sqe_set_data(sqe, wreq);
+  io_uring_submit(&ring);
+}
+
+void io_process_write(int fd, int res, io_request_t *rreq) {
+  printf("[%d] block_write: res:%i\n", fd, res);
+
+  prep_and_send_resp_frame(fd, CMD_WRITE, res);
 }
 
 
@@ -402,6 +455,15 @@ int main(int argc, char **argv) {
 
         // TODO: handle read errors
         io_process_read(fd, res, rreq);
+
+        break;
+      }
+      /* Block write came back */
+      case IO_KIND_WRITE: {
+        /* get a handle on the more specialised request */
+        io_request_t *rreq = (io_request_t *) req;
+
+        io_process_write(fd, res, rreq);
 
         break;
       }

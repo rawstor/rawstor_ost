@@ -34,10 +34,17 @@ typedef struct {
   u_int16_t len;
 }__attribute__((packed)) proto_io_frame_t;
 
+typedef struct {
+  commands_t cmd;
+  u_int64_t offset;
+  u_int16_t len;
+  bool sync;
+}__attribute__((packed)) proto_io_w_frame_t;
+
 /* response frames */
 typedef struct {
   commands_t cmd;
-  u_int16_t res;
+  int16_t res;
 }__attribute__((packed)) proto_resp_frame_t;
 
 typedef struct {
@@ -53,7 +60,10 @@ typedef enum {
   REQ_KIND_WRITE,
   REQ_KIND_CLOSE,
   // our block request
-  IO_KIND_READ
+  IO_KIND_READ,
+  IO_KIND_WRITE,
+  //IO_KIND_FSYNC,
+  //IO_KIND_DISCARD
 } req_kind;
 
 typedef struct {
