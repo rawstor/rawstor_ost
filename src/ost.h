@@ -34,6 +34,12 @@ typedef struct {
   u_int16_t len;
 }__attribute__((packed)) proto_io_frame_t;
 
+/* response frames */
+typedef struct {
+  commands_t cmd;
+  u_int16_t res;
+}__attribute__((packed)) proto_resp_frame_t;
+
 typedef struct {
   char id[OBJID_LEN];
   int fd;
@@ -57,7 +63,8 @@ typedef struct {
 
 typedef struct {
   request_t req;
-  struct iovec iovec;
+  // usually we'll have response frame before actual data
+  struct iovec iovecs[2];
   char iobuf[BUFSIZE];
 } io_request_t;
 

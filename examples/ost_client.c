@@ -21,6 +21,10 @@ void send_something(int sockfd) {
         strlcpy(mframe->var, "objid1", 10);
         int res = write(sockfd, mframe, sizeof(proto_basic_frame_t));
         printf("Sent request to set objid, res:%i\n", res);
+        read(sockfd, buff, sizeof(buff));
+        proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
+        memcpy(rframe, buff, sizeof(proto_resp_frame_t));
+        printf("Response from Server: cmd:%i res:%i\n", rframe->cmd, rframe->res);
 
         printf("Read data?");
         getchar();
@@ -31,8 +35,19 @@ void send_something(int sockfd) {
         frame->len = 100;
         res = write(sockfd, frame, sizeof(proto_io_frame_t));
         printf("Sent request read command, res:%i\n", res);
-        read(sockfd, buff, sizeof(buff));
-        printf("From Server : %s\n", buff);
+
+        read(sockfd, buff, sizeof(proto_resp_frame_t));
+        memcpy(rframe, buff, sizeof(proto_resp_frame_t));
+        printf("Response from Server: cmd:%i res:%i\n", rframe->cmd, rframe->res);
+
+        if (rframe->res >= 0) {
+          read(sockfd, buff, sizeof(buff));
+          printf("Response from Server data:\n%.*s\n", rframe->res, buff);
+        } else {
+          printf("There was an error on server side, so no data for us\n");
+        }
+
+
 
         printf("Retry?");
         getchar();
