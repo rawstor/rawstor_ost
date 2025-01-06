@@ -157,11 +157,11 @@ void process_read(int fd, int res, io_request_t *rreq) {
     io_request_t *nreq = block_io_req_new(IO_KIND_WRITE, fd, frame->len);
     nreq->iovecs[0].iov_base = rreq->iobuf + sizeof(proto_io_w_frame_t);
     // TODO: obj.fd may not exist yet, validate
-    printf("[%i]Let's write blocks! block_fd:%i offset:%li len:%i, data:\n%.*s\n",
-           fd, conn->obj.fd, frame->offset, frame->len, frame->len, rreq->iobuf + sizeof(proto_io_w_frame_t));
+    printf("[%i]Let's write blocks! block_fd:%i offset:%li len:%i, sync:%i data:\n%.*s\n",
+           fd, conn->obj.fd, frame->offset, frame->len, frame->sync, frame->len, rreq->iobuf + sizeof(proto_io_w_frame_t));
 
     if (frame->sync) {
-      io_uring_prep_writev2(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset, O_SYNC);
+      io_uring_prep_writev2(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset, RWF_SYNC);
     } else {
       io_uring_prep_writev(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset);
     }

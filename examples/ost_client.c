@@ -73,7 +73,7 @@ void write_something(int sockfd, char *data) {
   frame->cmd = CMD_WRITE;
   frame->offset = 0;
   frame->len = strlen(data);
-  frame->sync = 0;
+  frame->sync = 1;
 
   struct iovec iovecs[2];
 
