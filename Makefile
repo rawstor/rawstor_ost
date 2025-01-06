@@ -1,4 +1,19 @@
-CFLAGS ?= -g -O2 -Wall
+SUBDIRS = src examples
+
+
+define FOREACH
+	for dir in $(SUBDIRS); do \
+		$(MAKE) -C $${dir} $1; \
+	done;
+endef
+
 
 all:
-	gcc ost.c -luring -o ost ${CFLAGS}
+	$(call FOREACH,all)
+
+
+clean:
+	$(call FOREACH,clean)
+
+
+.PHONY: all clean

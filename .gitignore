@@ -1,2 +1,2 @@
-./ost
-./examples/ost-client
+src/ost
+examples/ost-client
