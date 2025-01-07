@@ -13,6 +13,7 @@
 
 /* Cheapest storage for our connections */
 conn_t* conns[NUM_CONNS];
+char objdir_path[256];
 struct io_uring ring;
 
 
@@ -45,8 +46,8 @@ static void req_free(request_t *req) {
   free(req);
 }
 
-conn_t *setup_conn(int fd) {
-  conn_t *conn = calloc( 1, sizeof(conn_t) );
+static conn_t *setup_conn(int fd) {
+  conn_t *conn = malloc(sizeof(conn_t));
   conn->fd = fd;
   return conn;
 }
@@ -62,14 +63,14 @@ static io_request_t *block_io_req_new(req_kind event, int fd,  uint16_t len) {
   return req;
 }
 
-proto_resp_frame_t *prep_resp_frame(commands_t cmd, int res) {
+static proto_resp_frame_t *prep_resp_frame(commands_t cmd, int res) {
   proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
   rframe->cmd = cmd;
   rframe->res = res;
   return rframe;
 }
 
-void prep_and_send_resp_frame(int fd, commands_t cmd, int res) {
+static void prep_and_send_resp_frame(int fd, commands_t cmd, int res) {
   proto_resp_frame_t *rframe = prep_resp_frame(cmd, res);
 
   io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd);
@@ -86,9 +87,11 @@ static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
   conn_t *conn = c;
   // TODO: set valid len
   strlcpy(conn->obj.id, frame->var, 32);
-  LOG_INFO("[%i]Set connection objid: %s\n", conn->fd, conn->obj.id);
+  char obj_file_path[600];
+  sprintf(obj_file_path, "%s/%s", objdir_path, conn->obj.id);
+  LOG_INFO("[%i]Set connection objid: %s, obj file:%s\n", conn->fd, conn->obj.id, obj_file_path);
   //TODO: validate incoming frame and objid
-  conn->obj.fd = open(conn->obj.id, O_RDWR | O_CREAT , 0664);
+  conn->obj.fd = open(obj_file_path, O_RDWR | O_CREAT , 0664);
   if (conn->obj.fd < 0) {
       perror("open");
       return 1;
@@ -125,7 +128,7 @@ void process_read(int fd, int res, io_request_t *rreq) {
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
     io_request_t *nreq = block_io_req_new(IO_KIND_READ, fd, frame->len);
     // TODO: obj.fd may not exist yet, validate
-    LOG_DEBUG("[%i]Let's read blocks! block_fd:%i offset:%li len:%i\n", fd, conn->obj.fd, frame->offset, frame->len);
+    LOG_DEBUG("[%i]Let's read blocks! block_fd:%i offset:%li len:%li\n", fd, conn->obj.fd, frame->offset, frame->len);
     io_uring_prep_readv(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset);
     io_uring_sqe_set_data(sqe, nreq);
     int err = io_uring_submit(&ring);
@@ -153,13 +156,13 @@ void process_read(int fd, int res, io_request_t *rreq) {
       break;
     }
 
-    /* async write object */
+    /* (a)sync write object */
     struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
     io_request_t *nreq = block_io_req_new(IO_KIND_WRITE, fd, frame->len);
     nreq->iovecs[0].iov_base = rreq->iobuf + sizeof(proto_io_w_frame_t);
     // TODO: obj.fd may not exist yet, validate
-    LOG_DEBUG("[%i]Let's write blocks! block_fd:%i offset:%li len:%i, sync:%i data:\n%.*s\n",
-           fd, conn->obj.fd, frame->offset, frame->len, frame->sync, frame->len, rreq->iobuf + sizeof(proto_io_w_frame_t));
+    LOG_DEBUG("[%i]Let's write blocks! block_fd:%i offset:%li len:%li, sync:%i\n",
+           fd, conn->obj.fd, frame->offset, frame->len, frame->sync);
 
     if (frame->sync) {
       io_uring_prep_writev2(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset, RWF_SYNC);
@@ -223,8 +226,8 @@ void io_process_write(int fd, int res, io_request_t *rreq) {
 
 
 int main(int argc, char **argv) {
-  if (argc < 2) {
-    printf("usage: %s <port>\n", argv[0]);
+  if (argc < 3) {
+    printf("usage: %s <port> <path_to_objdir>\n", argv[0]);
     exit(1);
   }
 
@@ -232,6 +235,18 @@ int main(int argc, char **argv) {
   if (port <= 0) {
     printf("'%s' not a valid port number\n", argv[1]);
     exit(1);
+  }
+
+  /* Use dir to store objects */
+  strlcpy(objdir_path, argv[2], 256);
+  struct stat info;
+
+  if( stat( objdir_path, &info ) != 0 ) {
+      printf( "cannot access %s\n", objdir_path );
+      exit(1);
+  } else if(!S_ISDIR(info.st_mode)) {
+      printf( "%s is not a directory\n", objdir_path );
+      exit(1);
   }
 
   /* create the server socket */

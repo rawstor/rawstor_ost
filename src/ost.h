@@ -2,6 +2,7 @@
 #include <liburing.h>
 #include "stdint.h"
 
+// TODO: requests may be larger than 8K len!!!!
 #define BUFSIZE 8192
 #define MIN_CMD_VAR_LEN 32
 // TODO: set appropriate val
@@ -31,13 +32,13 @@ typedef struct {
 typedef struct {
   commands_t cmd;
   u_int64_t offset;
-  u_int16_t len;
+  u_int64_t len;
 }__attribute__((packed)) proto_io_frame_t;
 
 typedef struct {
   commands_t cmd;
   u_int64_t offset;
-  u_int16_t len;
+  u_int64_t len;
   bool sync;
 }__attribute__((packed)) proto_io_w_frame_t;
 
