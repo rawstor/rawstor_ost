@@ -81,6 +81,8 @@ static void prep_and_send_resp_frame(int fd, commands_t cmd, int res) {
   io_uring_prep_writev(sqe, fd, wreq->iovecs, 1, 0);
   io_uring_sqe_set_data(sqe, wreq);
   io_uring_submit(&ring);
+
+  free(rframe);
 }
 
 static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
@@ -136,6 +138,8 @@ void process_read(int fd, int res, io_request_t *rreq) {
         perror("io_uring_submit");
         exit(1);
     }
+
+    free(frame);
     break;
   }
   case CMD_WRITE: {
@@ -176,12 +180,16 @@ void process_read(int fd, int res, io_request_t *rreq) {
         perror("io_uring_submit");
         exit(1);
     }
+
+    free(frame);
     break;
   }
   default:
     LOG_INFO("Unknown proto command: %i", mframe->cmd);
     break;
   }
+
+  free(mframe);
 
   // out:
 
@@ -194,7 +202,6 @@ void process_read(int fd, int res, io_request_t *rreq) {
   //   io_uring_prep_writev(sqe, fd, &wreq->iovecs, 1, 0);
   //   io_uring_sqe_set_data(sqe, wreq);
   //   io_uring_submit(&ring);
-
 }
 
 void io_process_read(int fd, int res, io_request_t *rreq) {
@@ -215,6 +222,8 @@ void io_process_read(int fd, int res, io_request_t *rreq) {
   io_uring_prep_writev(sqe, fd, wreq->iovecs, 2, 0);
   io_uring_sqe_set_data(sqe, wreq);
   io_uring_submit(&ring);
+
+  free(rframe);
 }
 
 void io_process_write(int fd, int res, io_request_t *rreq) {
@@ -415,7 +424,6 @@ int main(int argc, char **argv) {
            * iovecs we sent in) */
           process_read(fd, res, rreq);
 
-
         /* make a new async read, since the previous one was consumed. note
          * that we're reusing the request object, but its not special - freeing
          * it and making a new one would also be just fine */
@@ -472,6 +480,8 @@ int main(int argc, char **argv) {
         // TODO: handle read errors
         io_process_read(fd, res, rreq);
 
+        req_free(req);
+
         break;
       }
       /* Block write came back */
@@ -480,6 +490,7 @@ int main(int argc, char **argv) {
         io_request_t *rreq = (io_request_t *) req;
 
         io_process_write(fd, res, rreq);
+        req_free(req);
 
         break;
       }
