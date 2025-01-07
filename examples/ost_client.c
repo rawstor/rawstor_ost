@@ -16,9 +16,8 @@ void set_params(int sockfd, char *buff) {
   strlcpy(mframe->var, "objid1", 10);
   int res = write(sockfd, mframe, sizeof(proto_basic_frame_t));
   printf("Sent request to set objid, res:%i\n", res);
-  read(sockfd, buff, sizeof(buff));
   proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
-  memcpy(rframe, buff, sizeof(proto_resp_frame_t));
+  read(sockfd, rframe, sizeof(proto_resp_frame_t));
   printf("Response from Server: cmd:%i res:%i\n", rframe->cmd, rframe->res);
 }
 
@@ -41,13 +40,12 @@ void read_something(int sockfd) {
     res = write(sockfd, frame, sizeof(proto_io_frame_t));
     printf("Sent request read command, res:%i\n", res);
 
-    read(sockfd, buff, sizeof(proto_resp_frame_t));
     proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
-    memcpy(rframe, buff, sizeof(proto_resp_frame_t));
+    read(sockfd, rframe, sizeof(proto_resp_frame_t));
     printf("Response from Server: cmd:%i res:%i\n", rframe->cmd, rframe->res);
 
     if (rframe->res >= 0) {
-      read(sockfd, buff, sizeof(buff));
+      read(sockfd, buff, rframe->res);
       printf("Response from Server data:\n%.*s\n", rframe->res, buff);
     } else {
       printf("There was an error on server side, so no data for us\n");
@@ -86,9 +84,8 @@ void write_something(int sockfd, char *data) {
   res = writev(sockfd, iovecs, 2);
   printf("Sent request write command and data:%s, len:%li, res:%i\n", data, strlen(data), res);
 
-  read(sockfd, buff, sizeof(proto_resp_frame_t));
   proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
-  memcpy(rframe, buff, sizeof(proto_resp_frame_t));
+  read(sockfd, rframe, sizeof(proto_resp_frame_t));
   printf("Response from Server: cmd:%i res:%i\n", rframe->cmd, rframe->res);
 }
 
