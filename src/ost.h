@@ -2,16 +2,19 @@
 #include <liburing.h>
 #include "stdint.h"
 
-// TODO: requests may be larger than 8K len!!!!
+/* If request is larger, on-demand buffer of MAX_BUF_SIZE will be used */
 #define BUFSIZE 8192
+/* Use 3 iovecs for:
+  - op frame
+  - conn_t buf
+  - optional read buf
+  */
 #define IO_REQ_IOVECS 3
-#define CONN_BUFSIZE 65536
 #define MAX_BUF_SIZE 1048576
 #define MIN_CMD_VAR_LEN 32
 // TODO: set appropriate val
 #define OBJID_LEN 255
 
-#define URING_QUEUE_DEPTH (256)
 #define NUM_CONNS 65536
 
 // static const int COMMAND_BYTES = sizeof(uint8_t);
