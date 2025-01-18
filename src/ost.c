@@ -1,5 +1,6 @@
 #include "log.h"
 #include "ost.h"
+#include "ruring.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,13 +26,29 @@ static request_t *req_new(req_kind event, int fd) {
   return req;
 }
 
-static io_request_t *io_req_new(req_kind event, int fd) {
+inline void req_free(request_t *req) {
+  free(req);
+}
+
+inline io_request_t *io_req_new(req_kind event, int fd) {
   io_request_t *req = malloc(sizeof(io_request_t));
   req->req.event  = event;
   req->req.fd     = fd;
   req->iovecs[0].iov_base = req->iobuf;
   req->iovecs[0].iov_len  = sizeof(req->iobuf);
+  req->iovecs[1].iov_len  = 0;
+  req->iovecs[2].iov_len  = 0;
   return req;
+}
+
+inline void io_req_free(io_request_t *ioreq) {
+  for(int i = 0; i < IO_REQ_IOVECS; i++){
+    LOG_DEBUG("io_req_free: i:%i\n", i);
+    if (ioreq->iovecs[i].iov_len > 0 && ioreq->iovecs[i].iov_base != (void *)ioreq->iobuf) {
+      free(ioreq->iovecs[i].iov_base);
+    }
+}
+  free(ioreq);
 }
 
 static accept_request_t *accept_req_new(int fd) {
@@ -42,25 +59,50 @@ static accept_request_t *accept_req_new(int fd) {
   return req;
 }
 
-static void req_free(request_t *req) {
-  free(req);
-}
-
 static conn_t *setup_conn(int fd) {
   conn_t *conn = malloc(sizeof(conn_t));
   conn->fd = fd;
+  conn->in_bytes = 0;
+  conn->in_buf = malloc(MAX_BUF_SIZE);
+  conn->out_buf = malloc(MAX_BUF_SIZE);
+  conn->op = NULL;
   return conn;
 }
 
 void close_conn(int fd) {
+  if (conns[fd] == NULL) {
+    return;
+  }
+    /* make a async close request. we use a minimal request object
+    * because close has no interesting args or return; we just need a
+    * marker so we can recognise the response for what it is */
+  request_t *clreq = req_new(REQ_KIND_CLOSE, fd);
+  struct io_uring_sqe *sqe = get_sqe(&ring);
+  io_uring_prep_close(sqe, fd);
+  io_uring_sqe_set_data(sqe, clreq);
+  io_uring_submit(&ring);
+
+  free(conns[fd]->in_buf);
+  free(conns[fd]->out_buf);
+
   free(conns[fd]);
   conns[fd] = 0;
 }
 
-static io_request_t *block_io_req_new(req_kind event, int fd,  uint16_t len) {
-  io_request_t *req = io_req_new(event, fd);
-  req->iovecs[0].iov_len = len;
-  return req;
+inline void block_io_req_reuse(io_request_t *ioreq, req_kind event, uint32_t len) {
+  ioreq->req.event = event;
+  if (len>BUFSIZE) {
+    ioreq->iovecs[1].iov_base = malloc(len-BUFSIZE);
+    ioreq->iovecs[1].iov_len = len-BUFSIZE;
+  } else {
+    ioreq->iovecs[0].iov_len = len;
+  }
+}
+
+inline io_request_t *block_io_req_new(req_kind event, int fd,  uint32_t len) {
+  io_request_t *ioreq = io_req_new(event, fd);
+  block_io_req_reuse(ioreq, event, len);
+  return ioreq;
 }
 
 static proto_resp_frame_t *prep_resp_frame(commands_t cmd, int res) {
@@ -77,12 +119,12 @@ static void prep_and_send_resp_frame(int fd, commands_t cmd, int res) {
   wreq->iovecs[0].iov_base = rframe;
   wreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
-  struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+  struct io_uring_sqe *sqe = get_sqe(&ring);
   io_uring_prep_writev(sqe, fd, wreq->iovecs, 1, 0);
   io_uring_sqe_set_data(sqe, wreq);
   io_uring_submit(&ring);
 
-  free(rframe);
+  //free(rframe);
 }
 
 static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
@@ -96,145 +138,352 @@ static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
   conn->obj.fd = open(obj_file_path, O_RDWR | O_CREAT , 0664);
   if (conn->obj.fd < 0) {
       perror("open");
+      close_conn(c->fd);
       return 1;
   }
   return 0;
 }
 
-void process_read(int fd, int res, io_request_t *rreq) {
-  LOG_DEBUG("[%d] read: %.*s\n", fd, res, rreq->iobuf);
+int buffer_in_stream(conn_t *conn, proto_io_frame_t *frame, void *buf, int len) {
+  memcpy(conn->in_buf + conn->in_bytes, buf, len);
+  conn->in_bytes += len;
+
+  LOG_DEBUG("in_bytes: %i, now_len:%i, total_len:%i\n", conn->in_bytes, len, frame->len);
+
+  if (conn->in_bytes>frame->len) {
+    LOG_INFO("[%i]too much data for incoming write!", conn->fd);
+    return 1;
+  }
+
+  return 0;
+}
+
+void push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf) {
+    struct io_uring_sqe *sqe = get_sqe(&ring);
+    io_request_t *ioreq = block_io_req_new(IO_KIND_WRITE, conn->fd, frame->len);
+    //TODO: optimize memcpy?
+    char *nbuf = malloc(frame->len);
+    memcpy(nbuf, buf, frame->len);
+    ioreq->iovecs[0].iov_base = nbuf;
+    ioreq->iovecs[0].iov_len = frame->len;
+    LOG_DEBUG("[%i]push_block_write: block_fd:%i offset:%li len:%i, sync:%i\n",
+           conn->fd, conn->obj.fd, frame->offset, frame->len, frame->sync);
+
+    if (frame->sync) {
+      io_uring_prep_writev2(sqe, conn->obj.fd, ioreq->iovecs, 1, frame->offset, RWF_SYNC);
+    } else {
+      io_uring_prep_writev(sqe, conn->obj.fd, ioreq->iovecs, 1, frame->offset);
+    }
+
+    io_uring_sqe_set_data(sqe, ioreq);
+    io_uring_submit(&ring);
+}
+
+int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_request_t *ioreq) {
+  int frame_offset = 0;
+
+  LOG_DEBUG("[%d]process_recv: res:%i\n", fd, res);
+  void *data = extract_cqe_recv_buf(ctx, cqe);
+
   conn_t *conn = conns[fd];
 
-  /* try to cast raw stream bytes into our minimal structs */
-  proto_basic_frame_t *mframe = malloc(sizeof(proto_basic_frame_t));
-  memcpy(mframe, rreq->iobuf, sizeof(proto_basic_frame_t));
-  LOG_DEBUG("cmd: %i\n", mframe->cmd);
-
-  switch (mframe->cmd)
-  {
-  case CMD_SET_OBJECT: {
-    int res = set_conn_params(conn, mframe);
-
-    prep_and_send_resp_frame(fd, mframe->cmd, res);
-    break;
+  if (uring_unlikely(conns[fd] == NULL)) {
+    LOG_DEBUG("[%d]process_recv: packet from already disconnected client, ignore\n", fd);
+    goto error;
   }
-  case CMD_READ: {
-    if (res < sizeof(proto_io_frame_t)) {
-      LOG_INFO("Unknown proto command, too small: %.*s", res, rreq->iobuf);
+
+  if (conn->op == NULL) {
+    if (res < sizeof(proto_cmdonly_frame_t)) {
+      FLOG_INFO(stderr, "[%d]Recv data is less than minimal op frame!: %i < %lu\n", fd, res, sizeof(proto_basic_frame_t));
+      goto error;
+    }
+
+    /* try to cast raw stream bytes into our minimal structs */
+    proto_basic_frame_t *mframe = (proto_basic_frame_t*) data;
+    LOG_DEBUG("cmd: %i\n", mframe->cmd);
+
+    if (!conn->obj.fd && mframe->cmd!=CMD_SET_OBJECT) {
+      prep_and_send_resp_frame(fd, mframe->cmd, -1);
+      goto error;
+    }
+
+    /* Some commands won't have additional data */
+    switch (mframe->cmd)
+    {
+    case CMD_SET_OBJECT: {
+      int res = set_conn_params(conn, mframe);
+      prep_and_send_resp_frame(fd, mframe->cmd, res);
+      goto out_free_op;
       break;
     }
-    proto_io_frame_t *frame = malloc(sizeof(proto_io_frame_t));
-    memcpy(frame, rreq->iobuf, sizeof(proto_io_frame_t));
+    default: {
+      if (res < sizeof(proto_io_frame_t)) {
+        FLOG_INFO(stderr, "[%d]CMD_READ recv: data len:%i differs from frame size:%lu", fd, res, sizeof(proto_io_frame_t));
+        goto error;
+      }
+      LOG_DEBUG("[%d]process_recv: set new op: %i\n", fd, mframe->cmd);
 
-    /* async read object */
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-    io_request_t *nreq = block_io_req_new(IO_KIND_READ, fd, frame->len);
-    // TODO: obj.fd may not exist yet, validate
-    LOG_DEBUG("[%i]Let's read blocks! block_fd:%i offset:%li len:%li\n", fd, conn->obj.fd, frame->offset, frame->len);
-    io_uring_prep_readv(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset);
-    io_uring_sqe_set_data(sqe, nreq);
-    int err = io_uring_submit(&ring);
-    if (err < 0) {
-        perror("io_uring_submit");
-        exit(1);
+      /* Buffer may be reused on long multipart recv */
+      conn->op = malloc(sizeof(proto_io_frame_t));
+      memcpy(conn->op, mframe, sizeof(proto_io_frame_t));
+      frame_offset = sizeof(proto_io_frame_t);
+      LOG_DEBUG("[%d]process_recv after copy: set new op: %i\n", fd,  conn->op->cmd);
     }
+    }
+  }
 
-    free(frame);
+  LOG_DEBUG("process_recv after basic parse: %i %u %lu %u\n", conn->op->cmd, conn->op->len, conn->op->offset, conn->op->sync);
+
+  switch (conn->op->cmd)
+  {
+  case CMD_READ: {
+    /* async read object */
+    struct io_uring_sqe *sqe = get_sqe(&ring);
+    io_request_t *nioreq = block_io_req_new(IO_KIND_READ, fd, conn->op->len);
+    LOG_DEBUG("[%i]CMD_READ: block_fd:%i offset:%li len:%i\n", fd, conn->obj.fd, conn->op->offset, conn->op->len);
+    io_uring_prep_readv(sqe, conn->obj.fd, nioreq->iovecs, 2, conn->op->offset);
+    io_uring_sqe_set_data(sqe, nioreq);
+    io_uring_submit(&ring);
+
+    goto out_free_op;
     break;
   }
   case CMD_WRITE: {
-    if (res < sizeof(proto_io_frame_t)) {
-      LOG_INFO("Unknown proto command, too small: %.*s", res, rreq->iobuf);
-      break;
+    int data_len = res - frame_offset;
+    if (uring_unlikely(data_len > conn->op->len)) {
+      FLOG_INFO(stderr, "[%d]CMD_WRITE recv:we got more (%i) than data len:%u, such stream parsing is not implemented yet", fd, data_len, conn->op->len);
+      goto error;
     }
 
-    proto_io_w_frame_t *frame = malloc(sizeof(proto_io_w_frame_t));
-    memcpy(frame, rreq->iobuf, sizeof(proto_io_w_frame_t));
-
-   // TODO: data may be in next iterations of TCP stream, so we need a queue to fill for each object
-    if (res < frame->len + sizeof(proto_io_w_frame_t)) {
-      LOG_DEBUG("Write: data should be with command frame, TBD better stream handling. Waited:%li, actual:%i",
-             frame->len + sizeof(proto_io_w_frame_t),res);
-
-      prep_and_send_resp_frame(fd, mframe->cmd, -1001);
-      break;
+    /* Fast path, when full data is already here */
+    if (data_len == conn->op->len) {
+      push_block_write(conn, conn->op, data + frame_offset);
+      goto out_free_op;
     }
 
-    /* (a)sync write object */
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-    io_request_t *nreq = block_io_req_new(IO_KIND_WRITE, fd, frame->len);
-    nreq->iovecs[0].iov_base = rreq->iobuf + sizeof(proto_io_w_frame_t);
-    // TODO: obj.fd may not exist yet, validate
-    LOG_DEBUG("[%i]Let's write blocks! block_fd:%i offset:%li len:%li, sync:%i\n",
-           fd, conn->obj.fd, frame->offset, frame->len, frame->sync);
-
-    if (frame->sync) {
-      io_uring_prep_writev2(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset, RWF_SYNC);
-    } else {
-      io_uring_prep_writev(sqe, conn->obj.fd, nreq->iovecs, 1, frame->offset);
+    LOG_DEBUG("CMD_WRITE: got part of data, use slow path with buffer. Remaining:%i, actual:%i\n",
+                conn->op->len - conn->in_bytes, data_len);
+    if (buffer_in_stream(conn, conn->op, data + frame_offset, data_len)) {
+      goto error;
     }
 
-    io_uring_sqe_set_data(sqe, nreq);
-    int err = io_uring_submit(&ring);
-    if (err < 0) {
-        perror("io_uring_submit");
-        exit(1);
+    if (conn->in_bytes == conn->op->len) {
+      push_block_write(conn, conn->op, conn->in_buf);
+      memset(conn->in_buf, 0, conn->in_bytes);
+      conn->in_bytes = 0;
+      goto out_free_op;
     }
-
-    free(frame);
     break;
   }
   default:
-    LOG_INFO("Unknown proto command: %i", mframe->cmd);
+    FLOG_INFO(stderr, "[%d]Unknown proto command: %i\n", fd, conn->op->cmd);
+    goto error;
     break;
   }
 
-  free(mframe);
+  recycle_buffer(ctx, extract_cqe_buffer_idx(cqe));
+  return 0;
 
-  // out:
+  out_free_op:
+  free(conn->op);
+  conn->op = NULL;
+  recycle_buffer(ctx, extract_cqe_buffer_idx(cqe));
+  return 0;
 
-  //   /* Just echo for test */
-  //   io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd);
-  //   memcpy(wreq->iobuf, rreq->iobuf, res);
-  //   wreq->iovecs[0].iov_len = res;
-
-  //   struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-  //   io_uring_prep_writev(sqe, fd, &wreq->iovecs, 1, 0);
-  //   io_uring_sqe_set_data(sqe, wreq);
-  //   io_uring_submit(&ring);
+  error:
+  recycle_buffer(ctx, extract_cqe_buffer_idx(cqe));
+  return 1;
 }
 
-void io_process_read(int fd, int res, io_request_t *rreq) {
-  LOG_DEBUG("[%d] block_read: res:%i len:%li\n", fd, res, rreq->iovecs[0].iov_len);
-  //conn_t *conn = conns[fd];
+void io_process_read(int fd, int res, io_request_t *ioreq) {
+  LOG_DEBUG("[%d]io_process_read: res:%i len:%li\n", fd, res, ioreq->iovecs[0].iov_len + ioreq->iovecs[1].iov_len);
+
+  // Reuse ioreq to minimize allocations
+  ioreq->req.event = REQ_KIND_WRITE;
+  // Add space for resp frame before data
+  //memmove(&ioreq->iovecs[1], &ioreq->iovecs[0], 2*sizeof(struct iovec));
+  ioreq->iovecs[2] = ioreq->iovecs[1];
+  ioreq->iovecs[1] = ioreq->iovecs[0];
 
   proto_resp_frame_t *rframe = prep_resp_frame(CMD_READ, res);
+  ioreq->iovecs[0].iov_base = rframe;
+  ioreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
-  io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd);
-
-  wreq->iovecs[0].iov_base = rframe;
-  wreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
-
-  wreq->iovecs[1].iov_base = rreq->iovecs[0].iov_base;
-  wreq->iovecs[1].iov_len = rreq->iovecs[0].iov_len;
-
-  struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-  io_uring_prep_writev(sqe, fd, wreq->iovecs, 2, 0);
-  io_uring_sqe_set_data(sqe, wreq);
+  struct io_uring_sqe *sqe = get_sqe(&ring);
+  io_uring_prep_writev(sqe, fd, ioreq->iovecs, 3, 0);
+  io_uring_sqe_set_data(sqe, ioreq);
   io_uring_submit(&ring);
-
-  free(rframe);
 }
 
-void io_process_write(int fd, int res, io_request_t *rreq) {
-  LOG_DEBUG("[%d] block_write: res:%i\n", fd, res);
+void io_process_write(int fd, int res, io_request_t *ioreq) {
+  LOG_DEBUG("[%d]block_write: res:%i\n", fd, res);
 
   prep_and_send_resp_frame(fd, CMD_WRITE, res);
 }
 
+static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe) {
+  int ret = 0;
+  struct io_uring_sqe *sqe;
 
+  /* get our own request back. for the moment, just the header */
+  request_t *req = (request_t *) cqe->user_data;
+  int fd = req->fd;
+
+  /* the return value of the underlying syscall. typically a negative value
+    * will be the negated errno value for the call, so we can still do error
+    * handling */
+  int res = cqe->res;
+
+  /* do the right thing depending on what kind of request just completed */
+  switch (req->event) {
+
+    /* someone connected! */
+    case REQ_KIND_ACCEPT: {
+      /* get a handle on the more specialised request */
+      accept_request_t *areq = (accept_request_t *) req;
+
+      /* maybe it failed? */
+      if (res < 0) {
+        /* note negation of return value in place of errno */
+        FLOG_INFO(stderr, "accept: %s\n", strerror(-res));
+      } else {
+        /* hello! client address is in the req object, because that's what we
+          * pointed the request to in io_uring_prep_accept */
+        LOG_INFO("[%d]Connect from %s:%d\n", res, inet_ntoa(areq->addr.sin_addr), ntohs(areq->addr.sin_port));
+
+        /* remember our new connection. in a real server, you'd create a
+          * connection or user object of some sort, maybe send them a
+          * greeting, begin authentication, etc */
+
+        conns[res] = setup_conn(res);
+
+        /* set up an async read for the new connection */
+        io_request_t *ioreq = io_req_new(REQ_KIND_READ, res);
+        /* Don't try to reuse this ioreq! It'll be reused for recv_multishot! */
+        add_recv(ctx, res, ioreq);
+        io_uring_submit(&ring);
+      }
+
+      /* make a new async accept, since the previous one was consumed. note
+        * that we're reusing the request object, but its not special - freeing
+        * it and making a new one would also be just fine */
+      sqe = get_sqe(&ring);
+      io_uring_prep_accept(sqe, fd, (struct sockaddr *) &areq->addr, &areq->addrlen, 0);
+      io_uring_sqe_set_data(sqe, areq);
+      io_uring_submit(&ring);
+
+      break;
+    }
+
+    /* someone sent something */
+    case REQ_KIND_READ: {
+      /* Important - ioreq will be reused for same connection in recv_multishot, don't touch it! */
+      /* get a handle on the more specialised request */
+      io_request_t *ioreq = (io_request_t *) req;
+
+      /* some error, disconnect them */
+      if (res < 0) {
+        FLOG_INFO(stderr, "readv(%d): %i %s\n", fd, res, strerror(-res));
+
+        close_conn(fd);
+
+        /* free the read request, since we're not going to be reissuing it */
+        io_req_free(ioreq);
+      }
+
+      /* zero read, they gracefully closed the connection */
+      else if (uring_unlikely(res == 0)) {
+        LOG_INFO("[%d]closed\n", fd);
+
+        /* see error block above, this is the same behaviour */
+
+        close_conn(fd);
+        io_req_free(ioreq);
+      }
+
+      else {
+        /* they sent some data, which is now in the request iobuf (via the
+          * iovecs we sent in) */
+        if (!(cqe->flags & IORING_CQE_F_MORE) && conns[fd] != NULL) {
+          LOG_DEBUG("Incoming cqe didn't have IORING_CQE_F_MORE flag! Recreate recv event\n");
+
+          /* set up an async read for the new connection */
+          add_recv(ctx, res, ioreq);
+          break;
+
+          // if (ret)
+          // 	return ret;
+        }
+        //process_read(ctx, cqe, fd, res, rreq);
+        ret = process_recv(ctx, cqe, fd, res, ioreq);
+        if (ret) {
+          FLOG_DEBUG(stderr, "[%d]process_recv returned %i, disconnect client\n", fd, ret);
+          // TODO: client doesn't see disconnection
+          close_conn(fd);
+        }
+      }
+
+      break;
+    }
+
+    /* they finished receiving what we sent */
+    case REQ_KIND_WRITE: {
+      io_request_t *ioreq = (io_request_t *) cqe->user_data;
+      /* failed write, so disconnect them */
+      if (res < 0) {
+        FLOG_INFO(stderr, "writev(%d): %s\n", fd, strerror(-res));
+        io_req_free(ioreq);
+
+        /* see read error handling */
+        close_conn(fd);
+      }
+
+      else {
+        FLOG_DEBUG(stderr, "[%d]writev success: %i\n", fd, res);
+        /* written successfully, so just free req */
+        io_req_free(ioreq);
+      }
+
+      break;
+    }
+
+    /* async close completed */
+    case REQ_KIND_CLOSE: {
+      /* just free the request, we've already cleaned up and there's nothing
+        * useful we could do if the close failed anyway */
+      req_free(req);
+      break;
+    }
+    /* Block read came back */
+    case IO_KIND_READ: {
+      /* get a handle on the more specialised request */
+      io_request_t *ioreq = (io_request_t *) req;
+
+      // TODO: handle read errors
+      io_process_read(fd, res, ioreq);
+
+      break;
+    }
+    /* Block write came back */
+    case IO_KIND_WRITE: {
+      /* get a handle on the more specialised request */
+      io_request_t *ioreq = (io_request_t *) cqe->user_data;
+
+      io_process_write(fd, res, ioreq);
+      io_req_free(ioreq);
+
+      break;
+    }
+    default: {
+      FLOG_INFO(stderr, "[%d]handle_cqe: get cqe without useful user_data? req->event:%i, res:%i, user_data:%llu\n", fd, req->event, res, cqe->user_data);
+    }
+  }
+  return ret;
+}
 
 int main(int argc, char **argv) {
+  int ret;
+
   if (argc < 3) {
     printf("usage: %s <port> <path_to_objdir>\n", argv[0]);
     exit(1);
@@ -244,6 +493,7 @@ int main(int argc, char **argv) {
   if (port <= 0) {
     printf("'%s' not a valid port number\n", argv[1]);
     exit(1);
+
   }
 
   /* Use dir to store objects */
@@ -302,12 +552,22 @@ int main(int argc, char **argv) {
 
   LOG_DEBUG("listening on port %d\n", port);
 
+  struct ctx ctx;
+  ctx.ring = &ring;
+	ctx.af = AF_INET;
+	ctx.buf_shift = BUF_SHIFT;
+
+  if (setup_context(&ctx)) {
+		return 1;
+	}
+
   memset(&conns, 0, sizeof(conns));
 
-  if (io_uring_queue_init(URING_QUEUE_DEPTH, &ring, 0) < 0) {
-    perror("io_uring_queue_init");
-    exit(1);
-  }
+	ret = io_uring_register_files(ctx.ring, &server_fd, 1);
+	if (ret) {
+		fprintf(stderr, "register files: %s\n", strerror(-ret));
+		return -1;
+	}
 
   /* start with async form of accept(). just like the traditional version, it
    * will "block" until there's something to read, but that all happens inside
@@ -317,192 +577,44 @@ int main(int argc, char **argv) {
    * for the an async accept(), include our own request state so we can
    * understand the completion queue entry (CQE) that comes back, and submit it
    * for processing */
-  struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+  struct io_uring_sqe *sqe = get_sqe(&ring);
   accept_request_t *req = accept_req_new(server_fd);
   io_uring_prep_accept(sqe, server_fd, (struct sockaddr *) &req->addr, &req->addrlen, 0);
   io_uring_sqe_set_data(sqe, req);
   io_uring_submit(&ring);
 
+  // struct __kernel_timespec active_ts = {0, 1000};
+
   /* main loop. we just wait until a CQE is available, then process it */
   struct io_uring_cqe *cqe;
-  while (io_uring_wait_cqe(&ring, &cqe) >= 0) {
 
-    /* get our own request back. for the moment, just the header */
-    request_t *req = (request_t *) cqe->user_data;
-    int fd = req->fd;
+  while (1) {
+    unsigned head;
+    unsigned int i = 0;
+    //int ret;
 
-    /* the return value of the underlying syscall. typically a negative value
-     * will be the negated errno value for the call, so we can still do error
-     * handling */
-    int res = cqe->res;
+    // For single connection it may only worsen IOPS
+    //io_uring_submit_and_wait_timeout(&ring, &cqe, 10, &active_ts, NULL);
 
-    /* do the right thing depending on what kind of request just completed */
-    switch (req->event) {
-
-      /* someone connected! */
-      case REQ_KIND_ACCEPT: {
-        /* get a handle on the more specialised request */
-        accept_request_t *areq = (accept_request_t *) req;
-
-        /* maybe it failed? */
-        if (res < 0) {
-          /* note negation of return value in place of errno */
-          FLOG_INFO(stderr, "accept: %s\n", strerror(-res));
-        }
-
-        else {
-          /* hello! client address is in the req object, because that's what we
-           * pointed the request to in io_uring_prep_accept */
-          LOG_INFO("[%d]Connect from %s:%d\n", res, inet_ntoa(areq->addr.sin_addr), ntohs(areq->addr.sin_port));
-
-          /* remember our new connection. in a real server, you'd create a
-           * connection or user object of some sort, maybe send them a
-           * greeting, begin authentication, etc */
-
-          conns[res] = setup_conn(res);
-
-          /* set up an async read for the new connection */
-          sqe = io_uring_get_sqe(&ring);
-          io_request_t *rreq = io_req_new(REQ_KIND_READ, res);
-          io_uring_prep_readv(sqe, res, rreq->iovecs, 1, 0);
-          io_uring_sqe_set_data(sqe, rreq);
-          io_uring_submit(&ring);
-        }
-
-        /* make a new async accept, since the previous one was consumed. note
-         * that we're reusing the request object, but its not special - freeing
-         * it and making a new one would also be just fine */
-        sqe = io_uring_get_sqe(&ring);
-        io_uring_prep_accept(sqe, fd, (struct sockaddr *) &areq->addr, &areq->addrlen, 0);
-        io_uring_sqe_set_data(sqe, areq);
-        io_uring_submit(&ring);
-
-        break;
-      }
-
-      /* someone sent something */
-      case REQ_KIND_READ: {
-        /* get a handle on the more specialised request */
-        io_request_t *rreq = (io_request_t *) req;
-
-        /* some error, disconnect them */
-        if (res < 0) {
-          FLOG_INFO(stderr, "readv(%d): %s\n", fd, strerror(-res));
-
-          /* make a async close request. we use a minimal request object
-           * because close has no interesting args or return; we just need a
-           * marker so we can recognise the response for what it is */
-          request_t *clreq = req_new(REQ_KIND_CLOSE, fd);
-          sqe = io_uring_get_sqe(&ring);
-          io_uring_prep_close(sqe, fd);
-          io_uring_sqe_set_data(sqe, clreq);
-          io_uring_submit(&ring);
-
-          /* free the read request, since we're not going to be reissuing it */
-          req_free(req);
-          close_conn(fd);
-        }
-
-        /* zero read, they gracefully closed the connection */
-        else if (res == 0) {
-          LOG_INFO("[%d] closed\n", fd);
-
-          /* see error block above, this is the same behaviour */
-
-          request_t *clreq = req_new(REQ_KIND_CLOSE, fd);
-          sqe = io_uring_get_sqe(&ring);
-          io_uring_prep_close(sqe, fd);
-          io_uring_sqe_set_data(sqe, clreq);
-          io_uring_submit(&ring);
-
-          req_free(req);
-          close_conn(fd);
-        }
-
-        else {
-          /* they sent some data, which is now in the request iobuf (via the
-           * iovecs we sent in) */
-          process_read(fd, res, rreq);
-
-        /* make a new async read, since the previous one was consumed. note
-         * that we're reusing the request object, but its not special - freeing
-         * it and making a new one would also be just fine */
-          sqe = io_uring_get_sqe(&ring);
-          io_uring_prep_readv(sqe, fd, rreq->iovecs, 1, 0);
-          io_uring_sqe_set_data(sqe, rreq);
-          io_uring_submit(&ring);
-        }
-
-        break;
-      }
-
-      /* they finished receiving what we sent */
-      case REQ_KIND_WRITE: {
-
-        /* failed write, so disconnect them */
-        if (res < 0) {
-          FLOG_INFO(stderr, "writev(%d): %s\n", fd, strerror(-res));
-          req_free(req);
-
-          /* see read error handling */
-
-          request_t *clreq = req_new(REQ_KIND_CLOSE, fd);
-          sqe = io_uring_get_sqe(&ring);
-          io_uring_prep_close(sqe, fd);
-          io_uring_sqe_set_data(sqe, clreq);
-          io_uring_submit(&ring);
-
-          close_conn(fd);
-        }
-
-        else {
-          FLOG_DEBUG(stderr, "[%d] writev success: %i\n", fd, res);
-          /* written successfully, so just free the read req */
-          req_free(req);
-        }
-
-        break;
-      }
-
-      /* async close completed */
-      case REQ_KIND_CLOSE: {
-        /* just free the request, we've already cleaned up and there's nothing
-         * useful we could do if the close failed anyway */
-        req_free(req);
-        close_conn(fd);
-        break;
-      }
-      /* Block read came back */
-      case IO_KIND_READ: {
-        /* get a handle on the more specialised request */
-        io_request_t *rreq = (io_request_t *) req;
-
-        // TODO: handle read errors
-        io_process_read(fd, res, rreq);
-
-        req_free(req);
-
-        break;
-      }
-      /* Block write came back */
-      case IO_KIND_WRITE: {
-        /* get a handle on the more specialised request */
-        io_request_t *rreq = (io_request_t *) req;
-
-        io_process_write(fd, res, rreq);
-        req_free(req);
-
-        break;
-      }
+    io_uring_for_each_cqe(&ring, head, cqe) {
+      handle_cqe(&ctx, cqe);
+      i++;
     }
 
-    /* mark the CQE "seen", returning it to the ring for reuse */
-    io_uring_cqe_seen(&ring, cqe);
-  }
+    io_uring_submit(&ring);
+    advance_recycled_buffers(&ctx);
 
-  /* io_uring_wait_cqe failed. in a real server you might actually need to
-   * handle non-error cases like EINTR, but it complicates this example so we
-   * won't bother */
-  perror("io_uring_wait_cqe");
-  exit(1);
+		if (i) {
+			io_uring_cq_advance(&ring, i);
+		}
+
+    LOG_DEBUG("Main_loop: processed %i cqes via io_uring_for_each_cqe\n", i);
+    LOG_DEBUG("Unconsumed buffers: %i\n", io_uring_buf_ring_available(ctx.ring, ctx.buf_ring, ctx.bgid));
+
+    /* We already processed what we could, now wait for new events, we'll process them in next loop */
+    if (io_uring_wait_cqe(&ring, &cqe)<0) {
+      perror("io_uring_wait_cqe");
+      exit(1);
+    }
+  }
 }

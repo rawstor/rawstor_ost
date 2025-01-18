@@ -17,8 +17,8 @@ void set_params(int sockfd, char *buff) {
   int res = write(sockfd, mframe, sizeof(proto_basic_frame_t));
   printf("Sent request to set objid, res:%i\n", res);
   proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
-  read(sockfd, rframe, sizeof(proto_resp_frame_t));
-  printf("Response from Server: cmd:%i res:%i\n", rframe->cmd, rframe->res);
+  res = read(sockfd, rframe, sizeof(proto_resp_frame_t));
+  printf("Response from Server: cmd:%i frame_res:%i, res:%i\n", rframe->cmd, rframe->res, res);
 }
 
 void read_something(int sockfd) {
@@ -41,8 +41,8 @@ void read_something(int sockfd) {
     printf("Sent request read command, res:%i\n", res);
 
     proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
-    read(sockfd, rframe, sizeof(proto_resp_frame_t));
-    printf("Response from Server: cmd:%i res:%i\n", rframe->cmd, rframe->res);
+    res = read(sockfd, rframe, sizeof(proto_resp_frame_t));
+    printf("Response from Server: cmd:%i frame_res:%i, res:%i\n", rframe->cmd, rframe->res, res);
 
     if (rframe->res >= 0) {
       read(sockfd, buff, rframe->res);
@@ -67,7 +67,7 @@ void write_something(int sockfd, char *data) {
   printf("Write data?");
   getchar();
 
-  proto_io_w_frame_t *frame = malloc(sizeof(proto_io_w_frame_t));
+  proto_io_frame_t *frame = malloc(sizeof(proto_io_frame_t));
   frame->cmd = CMD_WRITE;
   frame->offset = 0;
   frame->len = strlen(data);
@@ -76,7 +76,7 @@ void write_something(int sockfd, char *data) {
   struct iovec iovecs[2];
 
   iovecs[0].iov_base = frame;
-  iovecs[0].iov_len = sizeof(proto_io_w_frame_t);
+  iovecs[0].iov_len = sizeof(proto_io_frame_t);
 
   iovecs[1].iov_base = data;
   iovecs[1].iov_len = strlen(data);
@@ -85,8 +85,8 @@ void write_something(int sockfd, char *data) {
   printf("Sent request write command and data:%s, len:%li, res:%i\n", data, strlen(data), res);
 
   proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
-  read(sockfd, rframe, sizeof(proto_resp_frame_t));
-  printf("Response from Server: cmd:%i res:%i\n", rframe->cmd, rframe->res);
+  res = read(sockfd, rframe, sizeof(proto_resp_frame_t));
+  printf("Response from Server: cmd:%i frame_res:%i, res:%i\n", rframe->cmd, rframe->res, res);
 }
 
 

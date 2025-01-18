@@ -1,4 +1,9 @@
-CFLAGS ?= -g -O2 -Wall
+CFLAGS ?= -g -O3 -Wall
 
-all:
-	gcc ost.c -luring -o ost ${CFLAGS}
+all: ost
+
+ost: ost.c ost.h ruring.o
+	gcc -o ost ost.c ruring.o -luring ${CFLAGS}
+
+ruring.o: ruring.c ruring.h
+	gcc -c ruring.c -luring ${CFLAGS}
