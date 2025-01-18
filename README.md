@@ -1,4 +1,29 @@
-### Protocol draft
+# Rawstor Object Storage Target (OST)
+
+## Run example:
+```
+# ost server
+make
+mkdir /tmp/objects
+truncate -s 2G /tmp/objects/TEST_OBJ
+./src/ost 8080 /tmp/objects/
+
+# qemu driver
+sudo modprobe vduse virtio-vdpa
+# run in separate session
+sudo ./storage-daemon/qemu-storage-daemon \
+  --blockdev '{"node-name":"test1","driver":"rawstor","size":2147483648,"cache":{"direct":true,"no-flush":false},"discard":"unmap"}' \
+  --export type=vduse-blk,id=test1,node-name=test1,name=test1,num-queues=16,queue-size=128,writable=true
+sudo vdpa dev add name test1 mgmtdev vduse
+
+# Example integrity test
+fio --bs=4k --iodepth=128 --numjobs=4 --rw=write --name=test --ioengine=libaio --direct=1 --verify=sha1 --do_verify=1 --group_reporting=1 --filename=/dev/vda
+
+# when finished
+sudo vdpa dev del test1
+```
+
+## Protocol draft
 
 - TCP stateful connection
 - Any request will have response frame before actual data transition (see `proto_resp_frame_t`)
