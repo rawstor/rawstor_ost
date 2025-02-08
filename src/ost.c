@@ -120,7 +120,7 @@ static void prep_and_send_resp_frame(int fd, commands_t cmd, int res) {
   wreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
   struct io_uring_sqe *sqe = get_sqe(&ring);
-  io_uring_prep_writev(sqe, fd, wreq->iovecs, 1, 0);
+  io_uring_prep_write(sqe, fd, wreq->iovecs[0].iov_base, wreq->iovecs[0].iov_len, 0);
   io_uring_sqe_set_data(sqe, wreq);
   io_uring_submit(&ring);
 
@@ -309,8 +309,13 @@ void io_process_read(int fd, int res, io_request_t *ioreq) {
   ioreq->iovecs[0].iov_base = rframe;
   ioreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
+	struct msghdr msg = {
+		.msg_iov = ioreq->iovecs,
+		.msg_iovlen = 3
+	};
+
   struct io_uring_sqe *sqe = get_sqe(&ring);
-  io_uring_prep_writev(sqe, fd, ioreq->iovecs, 3, 0);
+  io_uring_prep_sendmsg(sqe, fd, &msg, MSG_WAITALL);
   io_uring_sqe_set_data(sqe, ioreq);
   io_uring_submit(&ring);
 }
@@ -431,7 +436,7 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe) {
       io_request_t *ioreq = (io_request_t *) cqe->user_data;
       /* failed write, so disconnect them */
       if (res < 0) {
-        FLOG_INFO(stderr, "writev(%d): %s\n", fd, strerror(-res));
+        FLOG_INFO(stderr, "[%d]REQ_KIND_WRITE: err %s\n", fd, strerror(-res));
         io_req_free(ioreq);
 
         /* see read error handling */
@@ -439,7 +444,7 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe) {
       }
 
       else {
-        FLOG_DEBUG(stderr, "[%d]writev success: %i\n", fd, res);
+        FLOG_DEBUG(stderr, "[%d]REQ_KIND_WRITE success: %i\n", fd, res);
         /* written successfully, so just free req */
         io_req_free(ioreq);
       }
