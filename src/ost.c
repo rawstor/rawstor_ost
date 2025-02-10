@@ -194,6 +194,8 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
     goto error;
   }
 
+  process_start:
+
   if (conn->op == NULL) {
     if (res < sizeof(proto_cmdonly_frame_t)) {
       FLOG_INFO(stderr, "[%d]Recv data is less than minimal op frame!: %i < %lu\n", fd, res, sizeof(proto_basic_frame_t));
@@ -251,21 +253,24 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
     break;
   }
   case CMD_WRITE: {
+    int data_offset = frame_offset;
     int data_len = res - frame_offset;
-    if (uring_unlikely(data_len > conn->op->len)) {
-      FLOG_INFO(stderr, "[%d]CMD_WRITE recv:we got more (%i) than data len:%u, such stream parsing is not implemented yet", fd, data_len, conn->op->len);
-      goto error;
+
+    // There may be another frame after end of data
+    if (data_len > conn->op->len - conn->in_bytes) {
+      data_len = conn->op->len - conn->in_bytes;
+      frame_offset += data_len;
     }
 
     /* Fast path, when full data is already here */
     if (data_len == conn->op->len) {
-      push_block_write(conn, conn->op, data + frame_offset);
+      push_block_write(conn, conn->op, data + data_offset);
       goto out_free_op;
     }
 
     LOG_DEBUG("CMD_WRITE: got part of data, use slow path with buffer. Remaining:%i, actual:%i\n",
                 conn->op->len - conn->in_bytes, data_len);
-    if (buffer_in_stream(conn, conn->op, data + frame_offset, data_len)) {
+    if (buffer_in_stream(conn, conn->op, data + data_offset, data_len)) {
       goto error;
     }
 
@@ -281,6 +286,17 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
     FLOG_INFO(stderr, "[%d]Unknown proto command: %i\n", fd, conn->op->cmd);
     goto error;
     break;
+  }
+
+  if (res - frame_offset > 0) {
+    LOG_DEBUG("[%d]process_recv: there's additional data, process it too. len:%i\n",
+              fd, res - frame_offset);
+
+    free(conn->op);
+    conn->op = NULL;
+    res = res - frame_offset;
+    data = data + res;
+    goto process_start;
   }
 
   recycle_buffer(ctx, extract_cqe_buffer_idx(cqe));
