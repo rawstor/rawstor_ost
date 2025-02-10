@@ -13,7 +13,7 @@
 void set_params(int sockfd, char *buff) {
   proto_basic_frame_t *mframe = malloc(sizeof(proto_basic_frame_t));
   mframe->cmd = CMD_SET_OBJECT;
-  strlcpy(mframe->var, "objid1", 10);
+  strlcpy(mframe->obj_id, "objid1", OBJID_LEN);
   int res = write(sockfd, mframe, sizeof(proto_basic_frame_t));
   printf("Sent request to set objid, res:%i\n", res);
   proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));

@@ -10,10 +10,9 @@
   - optional read buf
   */
 #define IO_REQ_IOVECS 3
-#define MAX_BUF_SIZE 1048576
-#define MIN_CMD_VAR_LEN 32
-// TODO: set appropriate val
-#define OBJID_LEN 255
+#define MAX_BUF_SIZE 1048576 * 2
+#define OBJID_LEN 128
+#define MAX_OFFSET sizeof(u_int64_t)
 
 #define NUM_CONNS 65536
 
@@ -22,10 +21,13 @@
 
 // protocol section
 typedef enum {
+  // IO commands
   CMD_SET_OBJECT,
   CMD_READ,
   CMD_WRITE,
   CMD_DISCARD,
+  // control commands
+  CMD_ALLOCATE_OBJECT,
 } commands_t;
 
 /* Just for basic validation only */
@@ -37,11 +39,14 @@ typedef struct {
 typedef struct {
   commands_t cmd;
   // var is for minimal commands only, will be overridden in other command structs
-  char var[MIN_CMD_VAR_LEN];
+  char obj_id[OBJID_LEN];
+  u_int64_t offset;
+  u_int64_t val;
 }__attribute__((packed)) proto_basic_frame_t;
 
 typedef struct {
   commands_t cmd;
+  u_int16_t cid;
   u_int64_t offset;
   u_int32_t len;
   bool sync;
@@ -50,6 +55,7 @@ typedef struct {
 /* response frames */
 typedef struct {
   commands_t cmd;
+  u_int16_t cid;
   // TODO: if we send length in res - it should be the same type (signed-unsigned too)
   int32_t res;
 }__attribute__((packed)) proto_resp_frame_t;
@@ -83,7 +89,7 @@ typedef struct {
   // usually we'll have response frame before actual data, or/and additional iov
   struct iovec iovecs[IO_REQ_IOVECS];
   char iobuf[BUFSIZE];
-  int rbuf_idx;
+  u_int16_t cid;
 } io_request_t;
 
 typedef struct {

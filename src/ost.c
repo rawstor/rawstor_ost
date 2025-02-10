@@ -30,7 +30,7 @@ inline void req_free(request_t *req) {
   free(req);
 }
 
-inline io_request_t *io_req_new(req_kind event, int fd) {
+inline io_request_t *io_req_new(req_kind event, int fd, u_int16_t cid) {
   io_request_t *req = malloc(sizeof(io_request_t));
   req->req.event  = event;
   req->req.fd     = fd;
@@ -38,6 +38,7 @@ inline io_request_t *io_req_new(req_kind event, int fd) {
   req->iovecs[0].iov_len  = sizeof(req->iobuf);
   req->iovecs[1].iov_len  = 0;
   req->iovecs[2].iov_len  = 0;
+  req->cid = cid;
   return req;
 }
 
@@ -99,23 +100,24 @@ inline void block_io_req_reuse(io_request_t *ioreq, req_kind event, uint32_t len
   }
 }
 
-inline io_request_t *block_io_req_new(req_kind event, int fd,  uint32_t len) {
-  io_request_t *ioreq = io_req_new(event, fd);
+inline io_request_t *block_io_req_new(req_kind event, int fd, u_int16_t cid, uint32_t len) {
+  io_request_t *ioreq = io_req_new(event, fd, cid);
   block_io_req_reuse(ioreq, event, len);
   return ioreq;
 }
 
-static proto_resp_frame_t *prep_resp_frame(commands_t cmd, int res) {
+static proto_resp_frame_t *prep_resp_frame(commands_t cmd, u_int16_t cid, int res) {
   proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
   rframe->cmd = cmd;
+  rframe->cid = cid;
   rframe->res = res;
   return rframe;
 }
 
-static void prep_and_send_resp_frame(int fd, commands_t cmd, int res) {
-  proto_resp_frame_t *rframe = prep_resp_frame(cmd, res);
+static void prep_and_send_resp_frame(int fd, commands_t cmd, u_int16_t cid, int res) {
+  proto_resp_frame_t *rframe = prep_resp_frame(cmd, cid, res);
 
-  io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd);
+  io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd, cid);
   wreq->iovecs[0].iov_base = rframe;
   wreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
@@ -130,7 +132,7 @@ static void prep_and_send_resp_frame(int fd, commands_t cmd, int res) {
 static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
   conn_t *conn = c;
   // TODO: set valid len
-  strlcpy(conn->obj.id, frame->var, 32);
+  strlcpy(conn->obj.id, frame->obj_id, OBJID_LEN);
   char obj_file_path[600];
   sprintf(obj_file_path, "%s/%s", objdir_path, conn->obj.id);
   LOG_INFO("[%i]Set connection objid: %s, obj file:%s\n", conn->fd, conn->obj.id, obj_file_path);
@@ -160,7 +162,7 @@ int buffer_in_stream(conn_t *conn, proto_io_frame_t *frame, void *buf, int len) 
 
 void push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf) {
     struct io_uring_sqe *sqe = get_sqe(&ring);
-    io_request_t *ioreq = block_io_req_new(IO_KIND_WRITE, conn->fd, frame->len);
+    io_request_t *ioreq = block_io_req_new(IO_KIND_WRITE, conn->fd, frame->cid, frame->len);
     //TODO: optimize memcpy?
     char *nbuf = malloc(frame->len);
     memcpy(nbuf, buf, frame->len);
@@ -203,7 +205,7 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
     LOG_DEBUG("cmd: %i\n", mframe->cmd);
 
     if (!conn->obj.fd && mframe->cmd!=CMD_SET_OBJECT) {
-      prep_and_send_resp_frame(fd, mframe->cmd, -1);
+      prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
       goto error;
     }
 
@@ -212,7 +214,7 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
     {
     case CMD_SET_OBJECT: {
       int res = set_conn_params(conn, mframe);
-      prep_and_send_resp_frame(fd, mframe->cmd, res);
+      prep_and_send_resp_frame(fd, mframe->cmd, 0, res);
       goto out_free_op;
       break;
     }
@@ -239,7 +241,7 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
   case CMD_READ: {
     /* async read object */
     struct io_uring_sqe *sqe = get_sqe(&ring);
-    io_request_t *nioreq = block_io_req_new(IO_KIND_READ, fd, conn->op->len);
+    io_request_t *nioreq = block_io_req_new(IO_KIND_READ, fd, conn->op->cid, conn->op->len);
     LOG_DEBUG("[%i]CMD_READ: block_fd:%i offset:%li len:%i\n", fd, conn->obj.fd, conn->op->offset, conn->op->len);
     io_uring_prep_readv(sqe, conn->obj.fd, nioreq->iovecs, 2, conn->op->offset);
     io_uring_sqe_set_data(sqe, nioreq);
@@ -305,14 +307,14 @@ void io_process_read(int fd, int res, io_request_t *ioreq) {
   ioreq->iovecs[2] = ioreq->iovecs[1];
   ioreq->iovecs[1] = ioreq->iovecs[0];
 
-  proto_resp_frame_t *rframe = prep_resp_frame(CMD_READ, res);
+  proto_resp_frame_t *rframe = prep_resp_frame(CMD_READ, ioreq->cid, res);
   ioreq->iovecs[0].iov_base = rframe;
   ioreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
-	struct msghdr msg = {
-		.msg_iov = ioreq->iovecs,
-		.msg_iovlen = 3
-	};
+  struct msghdr msg = {
+    .msg_iov = ioreq->iovecs,
+    .msg_iovlen = 3
+  };
 
   struct io_uring_sqe *sqe = get_sqe(&ring);
   io_uring_prep_sendmsg(sqe, fd, &msg, MSG_WAITALL);
@@ -323,7 +325,7 @@ void io_process_read(int fd, int res, io_request_t *ioreq) {
 void io_process_write(int fd, int res, io_request_t *ioreq) {
   LOG_DEBUG("[%d]block_write: res:%i\n", fd, res);
 
-  prep_and_send_resp_frame(fd, CMD_WRITE, res);
+  prep_and_send_resp_frame(fd, CMD_WRITE, ioreq->cid, res);
 }
 
 static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe) {
@@ -363,7 +365,7 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe) {
         conns[res] = setup_conn(res);
 
         /* set up an async read for the new connection */
-        io_request_t *ioreq = io_req_new(REQ_KIND_READ, res);
+        io_request_t *ioreq = io_req_new(REQ_KIND_READ, res, 0);
         /* Don't try to reuse this ioreq! It'll be reused for recv_multishot! */
         add_recv(ctx, res, ioreq);
         io_uring_submit(&ring);
