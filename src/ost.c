@@ -187,12 +187,12 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
   LOG_DEBUG("[%d]process_recv: res:%i\n", fd, res);
   void *data = extract_cqe_recv_buf(ctx, cqe);
 
-  conn_t *conn = conns[fd];
-
   if (uring_unlikely(conns[fd] == NULL)) {
     LOG_DEBUG("[%d]process_recv: packet from already disconnected client, ignore\n", fd);
     goto error;
   }
+
+  conn_t *conn = conns[fd];
 
   process_start:
 
@@ -206,7 +206,7 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
     proto_basic_frame_t *mframe = (proto_basic_frame_t*) data;
     LOG_DEBUG("cmd: %i\n", mframe->cmd);
 
-    if (!conn->obj.fd && mframe->cmd!=CMD_SET_OBJECT) {
+    if (uring_unlikely(!conn->obj.fd && mframe->cmd!=CMD_SET_OBJECT)) {
       prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
       goto error;
     }
