@@ -197,8 +197,8 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
   process_start:
 
   if (conn->op == NULL) {
-    if (res < sizeof(proto_cmdonly_frame_t)) {
-      FLOG_INFO(stderr, "[%d]Recv data is less than minimal op frame!: %i < %lu\n", fd, res, sizeof(proto_basic_frame_t));
+    if (uring_unlikely(res < sizeof(commands_t))) {
+      FLOG_INFO(stderr, "[%d]Recv data is less than minimal op frame!: %i < %lu\n", fd, res, sizeof(commands_t));
       goto error;
     }
 

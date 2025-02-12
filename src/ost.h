@@ -30,12 +30,7 @@ typedef enum {
   CMD_ALLOCATE_OBJECT,
 } commands_t;
 
-/* Just for basic validation only */
-typedef struct {
-  commands_t cmd;
-}__attribute__((packed)) proto_cmdonly_frame_t;
-
-/* Minimalistic protocol frame */
+/* Basic protocol frame */
 typedef struct {
   commands_t cmd;
   // var is for minimal commands only, will be overridden in other command structs
@@ -44,6 +39,7 @@ typedef struct {
   u_int64_t val;
 }__attribute__((packed)) proto_basic_frame_t;
 
+/* IO protocol frame */
 typedef struct {
   commands_t cmd;
   u_int16_t cid;
