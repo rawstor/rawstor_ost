@@ -266,7 +266,7 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
     }
     case CMD_WRITE: {
       /* Fast path, when full data is already here */
-      if (res >= conn->op->len) {
+      if (conn->in_bytes == 0 && res >= conn->op->len) {
         push_block_write(conn, conn->op, data);
         processed_size = conn->op->len;
         goto out_free_op;
