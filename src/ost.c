@@ -290,6 +290,8 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
         FLOG_INFO(stderr, "[%d]Unexpected state: conn->in_bytes:%u > conn->op->len:%u\n", fd, conn->in_bytes, conn->op->len);
         goto error;
       }
+
+      goto next_iter;
       break;
     }
     default:
