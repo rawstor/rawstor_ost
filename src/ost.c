@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <netinet/tcp.h>
 #include <sys/ioctl.h>
+#include <sys/param.h>
 #include <errno.h>
 
 
@@ -168,8 +169,8 @@ void push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf) {
     memcpy(nbuf, buf, frame->len);
     ioreq->iovecs[0].iov_base = nbuf;
     ioreq->iovecs[0].iov_len = frame->len;
-    LOG_DEBUG("[%i]push_block_write: block_fd:%i offset:%li len:%i, sync:%i\n",
-           conn->fd, conn->obj.fd, frame->offset, frame->len, frame->sync);
+    LOG_DEBUG("[%i]push_block_write: block_fd:%i cid:%u offset:%li len:%i, sync:%i\n",
+           conn->fd, conn->obj.fd, conn->op->cid, frame->offset, frame->len, frame->sync);
 
     if (frame->sync) {
       io_uring_prep_writev2(sqe, conn->obj.fd, ioreq->iovecs, 1, frame->offset, RWF_SYNC);
@@ -181,8 +182,26 @@ void push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf) {
     io_uring_submit(&ring);
 }
 
+int cmd_process_set_object(conn_t *conn, int fd, void *data, int len) {
+  proto_basic_frame_t *frame = (proto_basic_frame_t*) data;
+  int res = set_conn_params(conn, frame);
+  prep_and_send_resp_frame(fd, frame->cmd, 0, res);
+  return 0;
+}
+
+int cmd_process_read(conn_t *conn, int fd, void *data, int len) {
+  /* async read object */
+  struct io_uring_sqe *sqe = get_sqe(&ring);
+  io_request_t *nioreq = block_io_req_new(IO_KIND_READ, fd, conn->op->cid, conn->op->len);
+  LOG_DEBUG("[%i]CMD_READ: block_fd:%i cid:%u offset:%li len:%i\n", fd, conn->obj.fd, conn->op->cid, conn->op->offset, conn->op->len);
+  io_uring_prep_readv(sqe, conn->obj.fd, nioreq->iovecs, 2, conn->op->offset);
+  io_uring_sqe_set_data(sqe, nioreq);
+  io_uring_submit(&ring);
+  return 0;
+}
+
 int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_request_t *ioreq) {
-  int frame_offset = 0;
+  int processed_size = 0;
 
   LOG_DEBUG("[%d]process_recv: res:%i\n", fd, res);
   void *data = extract_cqe_recv_buf(ctx, cqe);
@@ -194,123 +213,108 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
 
   conn_t *conn = conns[fd];
 
-  process_start:
+  while (processed_size < res) {
+    if (conn->op == NULL) {
+      if (uring_unlikely(res < sizeof(proto_min_frame_t))) {
+        FLOG_INFO(stderr, "[%d]Recv data is less than minimal op frame!: %i < %lu\n", fd, res, sizeof(proto_min_frame_t));
+        goto error;
+      }
 
-  if (conn->op == NULL) {
-    if (uring_unlikely(res < sizeof(commands_t))) {
-      FLOG_INFO(stderr, "[%d]Recv data is less than minimal op frame!: %i < %lu\n", fd, res, sizeof(commands_t));
-      goto error;
+      /* try to cast raw stream bytes into our minimal structs */
+      proto_min_frame_t *mframe = (proto_min_frame_t*) data;
+      LOG_DEBUG("cmd: %i\n", mframe->cmd);
+
+      if (uring_unlikely(!conn->obj.fd && mframe->cmd!=CMD_SET_OBJECT)) {
+        prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
+        goto error;
+      }
+
+      /* Some commands won't have additional data */
+      switch (mframe->cmd)
+      {
+      case CMD_SET_OBJECT: {
+        cmd_process_set_object(conn, fd, data, 0);
+        processed_size = sizeof(proto_basic_frame_t);
+        goto next_iter;
+        break;
+      }
+      default: {
+        if (res < sizeof(proto_io_frame_t)) {
+          FLOG_INFO(stderr, "[%d]CMD_READ recv: data len:%i differs from frame size:%lu", fd, res, sizeof(proto_io_frame_t));
+          goto error;
+        }
+
+        /* Buffer may be reused on long multipart recv */
+        conn->op = malloc(sizeof(proto_io_frame_t));
+        memcpy(conn->op, mframe, sizeof(proto_io_frame_t));
+        LOG_DEBUG("[%d]process_recv: set new op:%i cid:%u\n", fd, conn->op->cmd, conn->op->cid);
+
+        processed_size = sizeof(proto_io_frame_t);
+        data = data + processed_size;
+        res = res - processed_size;
+        processed_size = 0;
+      }
+      }
     }
 
-    /* try to cast raw stream bytes into our minimal structs */
-    proto_basic_frame_t *mframe = (proto_basic_frame_t*) data;
-    LOG_DEBUG("cmd: %i\n", mframe->cmd);
-
-    if (uring_unlikely(!conn->obj.fd && mframe->cmd!=CMD_SET_OBJECT)) {
-      prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
-      goto error;
-    }
-
-    /* Some commands won't have additional data */
-    switch (mframe->cmd)
+    switch (conn->op->cmd)
     {
-    case CMD_SET_OBJECT: {
-      int res = set_conn_params(conn, mframe);
-      prep_and_send_resp_frame(fd, mframe->cmd, 0, res);
+    case CMD_READ: {
+      cmd_process_read(conn, fd, data, 0);
       goto out_free_op;
       break;
     }
-    default: {
-      if (res < sizeof(proto_io_frame_t)) {
-        FLOG_INFO(stderr, "[%d]CMD_READ recv: data len:%i differs from frame size:%lu", fd, res, sizeof(proto_io_frame_t));
+    case CMD_WRITE: {
+      /* Fast path, when full data is already here */
+      if (res >= conn->op->len) {
+        push_block_write(conn, conn->op, data);
+        processed_size = conn->op->len;
+        goto out_free_op;
+      }
+
+      LOG_DEBUG("CMD_WRITE: got part of data, use slow path with buffer. Remaining:%i, actual:%i\n",
+                  conn->op->len - conn->in_bytes, res);
+      processed_size = MIN(res, conn->op->len - conn->in_bytes);
+      if (buffer_in_stream(conn, conn->op, data, processed_size)) {
         goto error;
       }
-      LOG_DEBUG("[%d]process_recv: set new op: %i\n", fd, mframe->cmd);
 
-      /* Buffer may be reused on long multipart recv */
-      conn->op = malloc(sizeof(proto_io_frame_t));
-      memcpy(conn->op, mframe, sizeof(proto_io_frame_t));
-      frame_offset = sizeof(proto_io_frame_t);
-      LOG_DEBUG("[%d]process_recv after copy: set new op: %i\n", fd,  conn->op->cmd);
+      if (conn->in_bytes == conn->op->len) {
+        push_block_write(conn, conn->op, conn->in_buf);
+        memset(conn->in_buf, 0, conn->in_bytes);
+        conn->in_bytes = 0;
+        goto out_free_op;
+      }
+
+      if (conn->in_bytes > conn->op->len) {
+        FLOG_INFO(stderr, "[%d]Unexpected state: conn->in_bytes:%u > conn->op->len:%u\n", fd, conn->in_bytes, conn->op->len);
+        goto error;
+      }
+      break;
     }
-    }
-  }
-
-  LOG_DEBUG("process_recv after basic parse: %i %u %lu %u\n", conn->op->cmd, conn->op->len, conn->op->offset, conn->op->sync);
-
-  switch (conn->op->cmd)
-  {
-  case CMD_READ: {
-    /* async read object */
-    struct io_uring_sqe *sqe = get_sqe(&ring);
-    io_request_t *nioreq = block_io_req_new(IO_KIND_READ, fd, conn->op->cid, conn->op->len);
-    LOG_DEBUG("[%i]CMD_READ: block_fd:%i offset:%li len:%i\n", fd, conn->obj.fd, conn->op->offset, conn->op->len);
-    io_uring_prep_readv(sqe, conn->obj.fd, nioreq->iovecs, 2, conn->op->offset);
-    io_uring_sqe_set_data(sqe, nioreq);
-    io_uring_submit(&ring);
-
-    goto out_free_op;
-    break;
-  }
-  case CMD_WRITE: {
-    int data_offset = frame_offset;
-    int data_len = res - frame_offset;
-
-    // There may be another frame after end of data
-    if (data_len > conn->op->len - conn->in_bytes) {
-      data_len = conn->op->len - conn->in_bytes;
-      frame_offset += data_len;
-    }
-
-    /* Fast path, when full data is already here */
-    if (data_len == conn->op->len) {
-      push_block_write(conn, conn->op, data + data_offset);
-      goto out_free_op;
-    }
-
-    LOG_DEBUG("CMD_WRITE: got part of data, use slow path with buffer. Remaining:%i, actual:%i\n",
-                conn->op->len - conn->in_bytes, data_len);
-    if (buffer_in_stream(conn, conn->op, data + data_offset, data_len)) {
+    default:
+      FLOG_INFO(stderr, "[%d]Unknown proto command: %i\n", fd, conn->op->cmd);
       goto error;
+      break;
     }
 
-    if (conn->in_bytes == conn->op->len) {
-      push_block_write(conn, conn->op, conn->in_buf);
-      memset(conn->in_buf, 0, conn->in_bytes);
-      conn->in_bytes = 0;
-      goto out_free_op;
-    }
-    break;
-  }
-  default:
-    FLOG_INFO(stderr, "[%d]Unknown proto command: %i\n", fd, conn->op->cmd);
-    goto error;
-    break;
-  }
-
-  if (res - frame_offset > 0) {
-    LOG_DEBUG("[%d]process_recv: there's additional data, process it too. len:%i\n",
-              fd, res - frame_offset);
-
+    out_free_op:
     free(conn->op);
     conn->op = NULL;
-    res = res - frame_offset;
-    data = data + res;
-    goto process_start;
+
+    next_iter:
+    data = data + processed_size;
+    res = res - processed_size;
+    processed_size = 0;
   }
 
-  recycle_buffer(ctx, extract_cqe_buffer_idx(cqe));
-  return 0;
-
-  out_free_op:
-  free(conn->op);
-  conn->op = NULL;
   recycle_buffer(ctx, extract_cqe_buffer_idx(cqe));
   return 0;
 
   error:
   recycle_buffer(ctx, extract_cqe_buffer_idx(cqe));
   return 1;
+
 }
 
 void io_process_read(int fd, int res, io_request_t *ioreq) {

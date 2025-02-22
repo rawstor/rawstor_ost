@@ -30,6 +30,11 @@ typedef enum {
   CMD_ALLOCATE_OBJECT,
 } commands_t;
 
+/* Minimal protocol frame (cmd only) */
+typedef struct {
+  commands_t cmd;
+}__attribute__((packed)) proto_min_frame_t;
+
 /* Basic protocol frame */
 typedef struct {
   commands_t cmd;

@@ -84,8 +84,8 @@ int setup_context(struct ctx *ctx)
 	struct io_uring_params params;
 	int ret;
 
-  ctx->bgid = 0;
-  ctx->recycled_buffers = 0;
+	ctx->bgid = 0;
+	ctx->recycled_buffers = 0;
 
 	memset(&params, 0, sizeof(params));
 	params.cq_entries = QD * 8;
