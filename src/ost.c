@@ -468,13 +468,13 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe) {
 
         /* see read error handling */
         close_conn(fd);
-      }
-
-      else {
+      } else {
         FLOG_DEBUG(stderr, "[%d]REQ_KIND_WRITE success: %i\n", fd, res);
         /* written successfully, so just free req */
         io_req_free(ioreq);
       }
+
+      // TODO: what if we wrote less than wanted? See SIGPIPE case
 
       break;
     }
@@ -527,6 +527,9 @@ int main(int argc, char **argv) {
     exit(1);
 
   }
+
+  // Client may not be interested in our data, ignore signal and handle write errors explicitly
+  signal(SIGPIPE, SIG_IGN);
 
   /* Use dir to store objects */
   strlcpy(objdir_path, argv[2], 256);
