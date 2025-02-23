@@ -27,7 +27,7 @@ typedef enum {
   CMD_WRITE,
   CMD_DISCARD,
   // control commands
-  CMD_ALLOCATE_OBJECT,
+  CMD_ALLOCATE_OBJ_CHUNK,
 } commands_t;
 
 /* Minimal protocol frame (cmd only) */
