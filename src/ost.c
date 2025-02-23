@@ -323,7 +323,7 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
 }
 
 void io_process_read(int fd, int res, io_request_t *ioreq) {
-  LOG_DEBUG("[%d]io_process_read: res:%i len:%li\n", fd, res, ioreq->iovecs[0].iov_len + ioreq->iovecs[1].iov_len);
+  LOG_DEBUG("[%d]io_process_read: cid:%u res:%i len:%li\n", fd, ioreq->cid, res, ioreq->iovecs[0].iov_len + ioreq->iovecs[1].iov_len);
 
   // Reuse ioreq to minimize allocations
   ioreq->req.event = REQ_KIND_WRITE;
@@ -348,7 +348,7 @@ void io_process_read(int fd, int res, io_request_t *ioreq) {
 }
 
 void io_process_write(int fd, int res, io_request_t *ioreq) {
-  LOG_DEBUG("[%d]block_write: res:%i\n", fd, res);
+  LOG_DEBUG("[%d]block_write: cid:%u res:%i\n", fd, ioreq->cid, res);
 
   prep_and_send_resp_frame(fd, CMD_WRITE, ioreq->cid, res);
 }
