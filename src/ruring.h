@@ -13,15 +13,16 @@
 #define BUF_SHIFT 17 /* 128K */
 #define CONTROLLEN 0
 
-struct ctx {
+struct ctx
+{
 	struct io_uring *ring;
 	struct io_uring_buf_ring *buf_ring;
-    int bgid;
+	int bgid;
 	unsigned char *buffer_base;
 	int buf_shift;
 	int af;
 	size_t buf_ring_size;
-    u_int16_t recycled_buffers;
+	u_int16_t recycled_buffers;
 };
 
 size_t buffer_size(struct ctx *ctx);
