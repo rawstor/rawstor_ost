@@ -11,7 +11,7 @@
   */
 #define IO_REQ_IOVECS 3
 #define MAX_BUF_SIZE 1048576 * 2
-#define OBJID_LEN 128
+#define OBJID_LEN 128/8
 #define MAX_OFFSET sizeof(u_int64_t)
 
 #define NUM_CONNS 65536
