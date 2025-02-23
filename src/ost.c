@@ -138,6 +138,9 @@ static int set_conn_params(conn_t *c, proto_basic_frame_t *frame) {
   sprintf(obj_file_path, "%s/%s", objdir_path, conn->obj.id);
   LOG_INFO("[%i]Set connection objid: %s, obj file:%s\n", conn->fd, conn->obj.id, obj_file_path);
   //TODO: validate incoming frame and objid
+  if (conn->obj.fd) {
+    close(conn->obj.fd);
+  }
   conn->obj.fd = open(obj_file_path, O_RDWR | O_CREAT , 0664);
   if (conn->obj.fd < 0) {
       perror("open");
