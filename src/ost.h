@@ -3,7 +3,7 @@
 #include "stdint.h"
 
 /* If request is larger, on-demand buffer of MAX_BUF_SIZE will be used */
-#define BUFSIZE 8192
+#define BUFSIZE sizeof(proto_io_frame_t)
 /* Use 3 iovecs for:
   - op frame
   - conn_t buf
