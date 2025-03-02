@@ -123,6 +123,7 @@ inline io_request_t *block_io_req_new(req_kind event, int fd, u_int16_t cid, uin
 static proto_resp_frame_t *prep_resp_frame(commands_t cmd, u_int16_t cid, int res)
 {
 	proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
+	rframe->magic = RAWSTOR_MAGIC;
 	rframe->cmd = cmd;
 	rframe->cid = cid;
 	rframe->res = res;
@@ -270,6 +271,14 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
 
 			/* try to cast raw stream bytes into our minimal structs */
 			proto_min_frame_t *mframe = (proto_min_frame_t *)fdata;
+
+			if (uring_unlikely(mframe->magic != RAWSTOR_MAGIC))
+			{
+				FLOG_INFO(stderr, "[%d]FATAL! Frame with wrong magic number:%x != %x, disconnect.\n", fd, mframe->magic, RAWSTOR_MAGIC);
+				prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
+				goto error;
+			}
+
 			LOG_DEBUG("cmd: %i\n", mframe->cmd);
 
 			if (uring_unlikely(!conn->obj.fd && mframe->cmd != CMD_SET_OBJECT))

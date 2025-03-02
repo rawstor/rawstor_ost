@@ -17,6 +17,8 @@
 
 #define NUM_CONNS 65536
 
+#define RAWSTOR_MAGIC 0x72737472 // "rstr" as ascii
+
 // static const int COMMAND_BYTES = sizeof(uint8_t);
 // static const int OFFSET_BYTES = sizeof(uint16_t);
 
@@ -35,12 +37,14 @@ typedef enum
 /* Minimal protocol frame (cmd only) */
 typedef struct
 {
+	uint32_t magic;
 	commands_t cmd;
 } __attribute__((packed)) proto_min_frame_t;
 
 /* Basic protocol frame */
 typedef struct
 {
+	uint32_t magic;
 	commands_t cmd;
 	// var is for minimal commands only, will be overridden in other command structs
 	char obj_id[OBJID_LEN];
@@ -51,6 +55,7 @@ typedef struct
 /* IO protocol frame */
 typedef struct
 {
+	uint32_t magic;
 	commands_t cmd;
 	u_int16_t cid;
 	u_int64_t offset;
@@ -61,6 +66,7 @@ typedef struct
 /* response frames */
 typedef struct
 {
+	uint32_t magic;
 	commands_t cmd;
 	u_int16_t cid;
 	// TODO: if we send length in res - it should be the same type (signed-unsigned too)
