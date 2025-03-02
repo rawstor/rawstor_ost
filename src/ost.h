@@ -13,6 +13,7 @@
 #define MAX_BUF_SIZE 1048576 * 2
 #define OBJID_LEN 128 / 8
 #define MAX_OFFSET sizeof(u_int64_t)
+#define MAX_IN_FRAME_SIZE 256
 
 #define NUM_CONNS 65536
 
@@ -117,4 +118,6 @@ typedef struct
 	void *out_buf;
 	int32_t in_bytes;
 	proto_io_frame_t *op;
+	char op_partial_buf[MAX_IN_FRAME_SIZE];
+	uint8_t op_partial_offset;
 } conn_t;

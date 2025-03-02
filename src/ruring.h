@@ -5,7 +5,6 @@
 
 #include "liburing.h"
 
-// TODO: QD is non-existent in our logic
 #define QD 64
 #define CQES (QD * 4)
 #define BUFFERS CQES

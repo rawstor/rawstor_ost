@@ -248,14 +248,28 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
 	{
 		if (conn->op == NULL)
 		{
-			if (uring_unlikely(res < sizeof(proto_min_frame_t)))
+			void *fdata = data;
+			int fres = res;
+			int new_part_size = 0;
+
+			// Corner case - previous batch of data had partial frame
+			if (uring_unlikely(conn->op_partial_offset))
 			{
-				FLOG_INFO(stderr, "[%d]Recv data is less than minimal op frame!: %i < %lu\n", fd, res, sizeof(proto_min_frame_t));
-				goto error;
+				new_part_size = MIN(res, MAX_IN_FRAME_SIZE - conn->op_partial_offset);
+				memcpy(conn->op_partial_buf + conn->op_partial_offset, fdata, new_part_size);
+
+				fdata = conn->op_partial_buf;
+				fres = new_part_size + conn->op_partial_offset;
+			}
+
+			if (uring_unlikely(fres < sizeof(proto_min_frame_t)))
+			{
+				FLOG_INFO(stderr, "[%d]Recv data is less than minimal op frame: %i < %lu, use op partial buffer\n", fd, fres, sizeof(proto_min_frame_t));
+				goto partial_res;
 			}
 
 			/* try to cast raw stream bytes into our minimal structs */
-			proto_min_frame_t *mframe = (proto_min_frame_t *)data;
+			proto_min_frame_t *mframe = (proto_min_frame_t *)fdata;
 			LOG_DEBUG("cmd: %i\n", mframe->cmd);
 
 			if (uring_unlikely(!conn->obj.fd && mframe->cmd != CMD_SET_OBJECT))
@@ -269,17 +283,22 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
 			{
 			case CMD_SET_OBJECT:
 			{
-				cmd_process_set_object(conn, fd, data, 0);
-				processed_size = sizeof(proto_basic_frame_t);
+				if (uring_unlikely(fres < sizeof(proto_basic_frame_t)))
+				{
+					FLOG_INFO(stderr, "[%d]CMD_READ recv: data len:%i differs from frame size:%lu, use op partial buffer", fd, fres, sizeof(proto_basic_frame_t));
+					goto partial_res;
+				}
+				cmd_process_set_object(conn, fd, fdata, 0);
+				processed_size = sizeof(proto_basic_frame_t) - conn->op_partial_offset;
 				goto next_iter;
 				break;
 			}
 			default:
 			{
-				if (res < sizeof(proto_io_frame_t))
+				if (uring_unlikely(fres < sizeof(proto_io_frame_t)))
 				{
-					FLOG_INFO(stderr, "[%d]CMD_READ recv: data len:%i differs from frame size:%lu", fd, res, sizeof(proto_io_frame_t));
-					goto error;
+					FLOG_INFO(stderr, "[%d]CMD_READ recv: data len:%i differs from frame size:%lu, use op partial buffer", fd, fres, sizeof(proto_io_frame_t));
+					goto partial_res;
 				}
 
 				/* Buffer may be reused on long multipart recv */
@@ -287,7 +306,7 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
 				memcpy(conn->op, mframe, sizeof(proto_io_frame_t));
 				LOG_DEBUG("[%d]process_recv: set new op:%i cid:%u\n", fd, conn->op->cmd, conn->op->cid);
 
-				processed_size = sizeof(proto_io_frame_t);
+				processed_size = sizeof(proto_io_frame_t) - conn->op_partial_offset;
 				data = data + processed_size;
 				res = res - processed_size;
 				processed_size = 0;
@@ -352,6 +371,17 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
 		data = data + processed_size;
 		res = res - processed_size;
 		processed_size = 0;
+		if (uring_unlikely(conn->op_partial_offset))
+		{
+			// Note: clean conn->op_partial_buf too?
+			conn->op_partial_offset = 0;
+		}
+		continue;
+
+	partial_res:
+		memcpy(conn->op_partial_buf + conn->op_partial_offset, data, res);
+		conn->op_partial_offset += res;
+		break;
 	}
 
 	recycle_buffer(ctx, extract_cqe_buffer_idx(cqe));
