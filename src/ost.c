@@ -557,7 +557,7 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
 		/* failed write, so disconnect them */
 		if (res < 0)
 		{
-			FLOG_INFO(stderr, "[%d]REQ_KIND_WRITE: err %s\n", fd, strerror(-res));
+			FLOG_INFO(stderr, "[%d](%u)REQ_KIND_WRITE: err %s\n", fd, ioreq->cid, strerror(-res));
 			io_req_free(ioreq);
 
 			/* see read error handling */
@@ -565,7 +565,7 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
 		}
 		else
 		{
-			FLOG_DEBUG(stderr, "[%d]REQ_KIND_WRITE success: %i\n", fd, res);
+			FLOG_DEBUG(stderr, "[%d](%u)REQ_KIND_WRITE success: %i\n", fd, ioreq->cid, res);
 			/* written successfully, so just free req */
 			io_req_free(ioreq);
 		}
