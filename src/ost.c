@@ -421,7 +421,10 @@ void io_process_read(int fd, int res, io_request_t *ioreq)
 		.msg_iovlen = 3};
 
 	struct io_uring_sqe *sqe = get_sqe(&ring);
-	io_uring_prep_sendmsg(sqe, fd, &msg, MSG_WAITALL);
+	/* Don't use MSG_WAITALL, because with many simultaneous
+	   io_uring_prep_sendmsg() inflight SQEs we may get mixed-up responses
+	   */
+	io_uring_prep_sendmsg(sqe, fd, &msg, MSG_NOSIGNAL); // MSG_WAITALL |
 	io_uring_sqe_set_data(sqe, ioreq);
 	io_uring_submit(&ring);
 }
@@ -670,6 +673,25 @@ int main(int argc, char **argv)
 		perror("setsockopt");
 		exit(1);
 	}
+
+	/* Ensure that we can send a large number of requests without blocking.
+	   It's crucial to have enough buffer, otherwise many simultaneous
+	   io_uring_prep_sendmsg() SQEs may mix up with each other, which breaks
+	   stream order guarantees and gives corrupt data!
+	*/
+	int socketbuf_size = 4096 * CQES;
+	socklen_t sockbufsize = sizeof(sockbufsize);
+	if (setsockopt(server_fd, SOL_SOCKET, SO_SNDBUF, &socketbuf_size, sizeof(sockbufsize)))
+	{
+		perror("setsockopt");
+		exit(1);
+	}
+	if (setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, &socketbuf_size, sizeof(sockbufsize)))
+	{
+		perror("setsockopt");
+		exit(1);
+	}
+	LOG_DEBUG("Set new socket buffer size: %d\n", socketbuf_size);
 
 	/* set up the address structure for binding, which is *:<port> */
 	struct sockaddr_in sin = {
