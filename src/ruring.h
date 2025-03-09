@@ -14,14 +14,14 @@
 
 struct ctx
 {
-	struct io_uring *ring;
-	struct io_uring_buf_ring *buf_ring;
-	int bgid;
-	unsigned char *buffer_base;
-	int buf_shift;
-	int af;
-	size_t buf_ring_size;
-	u_int16_t recycled_buffers;
+    struct io_uring *ring;
+    struct io_uring_buf_ring *buf_ring;
+    int bgid;
+    unsigned char *buffer_base;
+    int buf_shift;
+    int af;
+    size_t buf_ring_size;
+    u_int16_t recycled_buffers;
 };
 
 size_t buffer_size(struct ctx *ctx);
