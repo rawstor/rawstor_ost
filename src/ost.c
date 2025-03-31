@@ -1,6 +1,7 @@
 #include "log.h"
 #include "ost.h"
 #include "ruring.h"
+#include "uuid.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -150,10 +151,12 @@ static int set_conn_params(conn_t *c, proto_basic_frame_t *frame)
 {
     conn_t *conn = c;
     // TODO: set valid len
-    strlcpy(conn->obj.id, frame->obj_id, OBJID_LEN);
+    memcpy(conn->obj.id.bytes, frame->obj_id, sizeof(conn->obj.id.bytes));
     char obj_file_path[600];
-    sprintf(obj_file_path, "%s/%s", objdir_path, conn->obj.id);
-    LOG_INFO("[%i]Set connection objid: %s, obj file:%s\n", conn->fd, conn->obj.id, obj_file_path);
+    rawstor_uuid_string uuid;
+    rawstor_uuid_to_string(&conn->obj.id, &uuid);
+    sprintf(obj_file_path, "%s/%s", objdir_path, uuid);
+    LOG_INFO("[%i]Set connection objid: %s, obj file:%s\n", conn->fd, uuid, obj_file_path);
     // TODO: validate incoming frame and objid
     if (conn->obj.fd)
     {
