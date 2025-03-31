@@ -1,3 +1,6 @@
+#ifndef RAWSTOR_OST_H
+#define RAWSTOR_OST_H
+
 #include <arpa/inet.h>
 #include <liburing.h>
 #include "stdint.h"
@@ -47,7 +50,7 @@ typedef struct
     uint32_t magic;
     commands_t cmd;
     // var is for minimal commands only, will be overridden in other command structs
-    char obj_id[OBJID_LEN];
+    u_int8_t obj_id[OBJID_LEN];
     u_int64_t offset;
     u_int64_t val;
 } __attribute__((packed)) proto_basic_frame_t;
@@ -73,9 +76,15 @@ typedef struct
     int32_t res;
 } __attribute__((packed)) proto_resp_frame_t;
 
+typedef struct {
+    uint8_t bytes[16];
+} rawstor_uuid;
+
+typedef char rawstor_uuid_string[37];
+
 typedef struct
 {
-    char id[OBJID_LEN];
+    rawstor_uuid id;
     int fd;
 } obj_t;
 
@@ -127,3 +136,5 @@ typedef struct
     char op_partial_buf[MAX_IN_FRAME_SIZE];
     uint8_t op_partial_offset;
 } conn_t;
+
+#endif // RAWSTOR_OST_H
