@@ -1,5 +1,11 @@
 # Rawstor Object Storage Target (OST)
 
+## Build requirements
+Example for Debian:
+```bash
+apt install liburing-dev libxxhash-dev
+```
+
 ## Run example:
 ```
 # ost server

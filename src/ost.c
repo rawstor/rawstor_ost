@@ -1,3 +1,4 @@
+#include "hash.h"
 #include "log.h"
 #include "ost.h"
 #include "ruring.h"
@@ -121,19 +122,20 @@ inline io_request_t *block_io_req_new(req_kind event, int fd, u_int16_t cid, uin
     return ioreq;
 }
 
-static proto_resp_frame_t *prep_resp_frame(commands_t cmd, u_int16_t cid, int res)
+static proto_resp_frame_t *prep_resp_frame(commands_t cmd, u_int16_t cid, int res, XXH64_hash_t hash)
 {
     proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
     rframe->magic = RAWSTOR_MAGIC;
     rframe->cmd = cmd;
     rframe->cid = cid;
     rframe->res = res;
+    rframe->hash = hash;
     return rframe;
 }
 
 static void prep_and_send_resp_frame(int fd, commands_t cmd, u_int16_t cid, int res)
 {
-    proto_resp_frame_t *rframe = prep_resp_frame(cmd, cid, res);
+    proto_resp_frame_t *rframe = prep_resp_frame(cmd, cid, res, 0);
 
     io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd, cid);
     wreq->iovecs[0].iov_base = rframe;
@@ -188,8 +190,17 @@ int buffer_in_stream(conn_t *conn, proto_io_frame_t *frame, void *buf, int len)
     return 0;
 }
 
-void push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf)
+int push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf)
 {
+    XXH64_hash_t hash = hash_buf(buf, frame->len);
+
+    if (frame->hash != hash)
+    {
+        FLOG_INFO(stderr, "[%d]Write request data hash mismatch: %zu != %lu\n", conn->fd, frame->hash, hash);
+        errno = EIO;
+        return -errno;
+    }
+
     struct io_uring_sqe *sqe = get_sqe(&ring);
     io_request_t *ioreq = block_io_req_new(IO_KIND_WRITE, conn->fd, frame->cid, frame->len);
     // TODO: optimize memcpy?
@@ -211,6 +222,8 @@ void push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf)
 
     io_uring_sqe_set_data(sqe, ioreq);
     io_uring_submit(&ring);
+
+    return 0;
 }
 
 int cmd_process_set_object(conn_t *conn, int fd, void *data, int len)
@@ -339,7 +352,8 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
             /* Fast path, when full data is already here */
             if (conn->in_bytes == 0 && res >= conn->op->len)
             {
-                push_block_write(conn, conn->op, data);
+                if (push_block_write(conn, conn->op, data))
+                    goto error;
                 processed_size = conn->op->len;
                 goto out_free_op;
             }
@@ -354,7 +368,8 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
 
             if (conn->in_bytes == conn->op->len)
             {
-                push_block_write(conn, conn->op, conn->in_buf);
+                if (push_block_write(conn, conn->op, conn->in_buf))
+                    goto error;
                 memset(conn->in_buf, 0, conn->in_bytes);
                 conn->in_bytes = 0;
                 goto out_free_op;
@@ -406,7 +421,9 @@ error:
 
 void io_process_read(int fd, int res, io_request_t *ioreq)
 {
-    LOG_DEBUG("[%d]io_process_read: cid:%u res:%i len:%li\n", fd, ioreq->cid, res, ioreq->iovecs[0].iov_len + ioreq->iovecs[1].iov_len);
+    XXH64_hash_t hash = hash_vector(ioreq->iovecs, 2);
+
+    LOG_DEBUG("[%d]io_process_read: cid:%u res:%i len:%li hash: %lu\n", fd, ioreq->cid, res, ioreq->iovecs[0].iov_len + ioreq->iovecs[1].iov_len, hash);
 
     // Reuse ioreq to minimize allocations
     ioreq->req.event = REQ_KIND_WRITE;
@@ -415,7 +432,7 @@ void io_process_read(int fd, int res, io_request_t *ioreq)
     ioreq->iovecs[2] = ioreq->iovecs[1];
     ioreq->iovecs[1] = ioreq->iovecs[0];
 
-    proto_resp_frame_t *rframe = prep_resp_frame(CMD_READ, ioreq->cid, res);
+    proto_resp_frame_t *rframe = prep_resp_frame(CMD_READ, ioreq->cid, res, hash);
     ioreq->iovecs[0].iov_base = rframe;
     ioreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 

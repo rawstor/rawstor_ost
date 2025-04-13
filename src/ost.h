@@ -63,6 +63,7 @@ typedef struct
     u_int16_t cid;
     u_int64_t offset;
     u_int32_t len;
+    u_int64_t hash;
     bool sync;
 } __attribute__((packed)) proto_io_frame_t;
 
@@ -74,6 +75,7 @@ typedef struct
     u_int16_t cid;
     // TODO: if we send length in res - it should be the same type (signed-unsigned too)
     int32_t res;
+    u_int64_t hash;
 } __attribute__((packed)) proto_resp_frame_t;
 
 typedef struct {
