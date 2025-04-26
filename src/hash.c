@@ -1,10 +1,11 @@
-#include <assert.h>
 #include "hash.h"
 
-inline XXH64_hash_t hash_buf(void *buf, size_t length)
-{
-    return XXH3_64bits(buf, length);
-}
+#include <xxhash.h>
+
+#include <sys/uio.h>
+
+#include <assert.h>
+
 
 XXH64_hash_t hash_vector(const struct iovec *iovecs, unsigned nr_vecs)
 {
