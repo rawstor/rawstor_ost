@@ -9,6 +9,8 @@ apt install liburing-dev libxxhash-dev
 ## Run example:
 ```
 # ost server
+./autogen.sh
+./configure
 make
 mkdir /tmp/objects
 truncate -s 2G /tmp/objects/00000000-0000-7000-8000-000100000000
