@@ -799,7 +799,7 @@ int main(int argc, char **argv)
         }
 
         LOG_DEBUG("Main_loop: processed %i cqes via io_uring_for_each_cqe\n", i);
-        LOG_DEBUG("Unconsumed buffers: %u\n", io_uring_sq_ready(ctx.ring));
+        LOG_DEBUG("Unconsumed SQEs: %u\n", io_uring_sq_ready(ctx.ring));
 
         /* We already processed what we could, now wait for new events, we'll process them in next loop */
         if (io_uring_wait_cqe(&ring, &cqe) < 0)
