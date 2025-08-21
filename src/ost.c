@@ -700,13 +700,12 @@ int main(int argc, char **argv)
        stream order guarantees and gives corrupt data!
     */
     int socketbuf_size = 4096 * CQES;
-    socklen_t sockbufsize = sizeof(sockbufsize);
-    if (setsockopt(server_fd, SOL_SOCKET, SO_SNDBUF, &socketbuf_size, sizeof(sockbufsize)))
+    if (setsockopt(server_fd, SOL_SOCKET, SO_SNDBUF, &socketbuf_size, sizeof(socketbuf_size)))
     {
         perror("setsockopt");
         exit(1);
     }
-    if (setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, &socketbuf_size, sizeof(sockbufsize)))
+    if (setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, &socketbuf_size, sizeof(socketbuf_size)))
     {
         perror("setsockopt");
         exit(1);
