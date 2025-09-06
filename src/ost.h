@@ -1,9 +1,12 @@
 #ifndef RAWSTOR_OST_H
 #define RAWSTOR_OST_H
 
-#include <arpa/inet.h>
 #include <liburing.h>
-#include "stdint.h"
+
+#include <arpa/inet.h>
+
+#include <stdint.h>
+
 
 /* If request is larger, on-demand buffer of MAX_BUF_SIZE will be used */
 #define BUFSIZE sizeof(proto_io_frame_t)
