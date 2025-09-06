@@ -1,9 +1,16 @@
-#include <sys/uio.h>
+#ifndef RAWSTOR_RURING_H
+#define RAWSTOR_RURING_H
+
+#include <liburing.h>
+
 #include <arpa/inet.h>
-#include <stdbool.h>
+
+#include <sys/uio.h>
 #include <sys/mman.h>
 
-#include "liburing.h"
+#include <stdbool.h>
+#include <stdint.h>
+
 
 #define QD 64
 #define CQES (QD * 4)
@@ -11,6 +18,7 @@
 
 #define BUF_SHIFT 17 /* 128K */
 #define CONTROLLEN 0
+
 
 struct ctx
 {
@@ -23,6 +31,7 @@ struct ctx
     size_t buf_ring_size;
     uint16_t recycled_buffers;
 };
+
 
 size_t buffer_size(struct ctx *ctx);
 unsigned char *get_buffer(struct ctx *ctx, int idx);
@@ -37,3 +46,6 @@ int add_recv(struct ctx *ctx, int idx, void *user_data);
 
 int extract_cqe_buffer_idx(struct io_uring_cqe *cqe);
 void *extract_cqe_recv_buf(struct ctx *ctx, struct io_uring_cqe *cqe);
+
+
+#endif // RAWSTOR_RURING_H
