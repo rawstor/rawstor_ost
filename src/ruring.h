@@ -5,8 +5,8 @@
 
 #include <arpa/inet.h>
 
-#include <sys/uio.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 
 #include <stdbool.h>
 #include <stdint.h>
