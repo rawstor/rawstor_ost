@@ -33,7 +33,7 @@ inline void req_free(request_t *req)
     free(req);
 }
 
-inline io_request_t *io_req_new(req_kind event, int fd, u_int16_t cid)
+inline io_request_t *io_req_new(req_kind event, int fd, uint16_t cid)
 {
     io_request_t *req = malloc(sizeof(io_request_t));
     req->req.event = event;
@@ -115,14 +115,14 @@ inline void block_io_req_reuse(io_request_t *ioreq, req_kind event, uint32_t len
     }
 }
 
-inline io_request_t *block_io_req_new(req_kind event, int fd, u_int16_t cid, uint32_t len)
+inline io_request_t *block_io_req_new(req_kind event, int fd, uint16_t cid, uint32_t len)
 {
     io_request_t *ioreq = io_req_new(event, fd, cid);
     block_io_req_reuse(ioreq, event, len);
     return ioreq;
 }
 
-static proto_resp_frame_t *prep_resp_frame(commands_t cmd, u_int16_t cid, int res, XXH64_hash_t hash)
+static proto_resp_frame_t *prep_resp_frame(commands_t cmd, uint16_t cid, int res, XXH64_hash_t hash)
 {
     proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
     rframe->magic = RAWSTOR_MAGIC;
@@ -133,7 +133,7 @@ static proto_resp_frame_t *prep_resp_frame(commands_t cmd, u_int16_t cid, int re
     return rframe;
 }
 
-static void prep_and_send_resp_frame(int fd, commands_t cmd, u_int16_t cid, int res)
+static void prep_and_send_resp_frame(int fd, commands_t cmd, uint16_t cid, int res)
 {
     proto_resp_frame_t *rframe = prep_resp_frame(cmd, cid, res, 0);
 

@@ -58,7 +58,7 @@ block-beta
 ```mermaid
 block-beta
   columns 8
-  a["int: commands_t"]:1 b["u_int64_t: offset"]:2 c["u_int64_t: len"]:2
+  a["int: commands_t"]:1 b["uint64_t: offset"]:2 c["uint64_t: len"]:2
 ```
 
 

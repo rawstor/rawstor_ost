@@ -15,7 +15,7 @@
 #define IO_REQ_IOVECS 3
 #define MAX_BUF_SIZE 1048576 * 2
 #define OBJID_LEN 128 / 8
-#define MAX_OFFSET sizeof(u_int64_t)
+#define MAX_OFFSET sizeof(uint64_t)
 #define MAX_IN_FRAME_SIZE 256
 
 #define NUM_CONNS 65536
@@ -50,9 +50,9 @@ typedef struct
     uint32_t magic;
     commands_t cmd;
     // var is for minimal commands only, will be overridden in other command structs
-    u_int8_t obj_id[OBJID_LEN];
-    u_int64_t offset;
-    u_int64_t val;
+    uint8_t obj_id[OBJID_LEN];
+    uint64_t offset;
+    uint64_t val;
 } __attribute__((packed)) proto_basic_frame_t;
 
 /* IO protocol frame */
@@ -60,10 +60,10 @@ typedef struct
 {
     uint32_t magic;
     commands_t cmd;
-    u_int16_t cid;
-    u_int64_t offset;
-    u_int32_t len;
-    u_int64_t hash;
+    uint16_t cid;
+    uint64_t offset;
+    uint32_t len;
+    uint64_t hash;
     bool sync;
 } __attribute__((packed)) proto_io_frame_t;
 
@@ -72,10 +72,10 @@ typedef struct
 {
     uint32_t magic;
     commands_t cmd;
-    u_int16_t cid;
+    uint16_t cid;
     // TODO: if we send length in res - it should be the same type (signed-unsigned too)
     int32_t res;
-    u_int64_t hash;
+    uint64_t hash;
 } __attribute__((packed)) proto_resp_frame_t;
 
 typedef struct {
@@ -117,7 +117,7 @@ typedef struct
     // usually we'll have response frame before actual data, or/and additional iov
     struct iovec iovecs[IO_REQ_IOVECS];
     char iobuf[BUFSIZE];
-    u_int16_t cid;
+    uint16_t cid;
 } io_request_t;
 
 typedef struct

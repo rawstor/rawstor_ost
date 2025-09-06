@@ -21,7 +21,7 @@ struct ctx
     int buf_shift;
     int af;
     size_t buf_ring_size;
-    u_int16_t recycled_buffers;
+    uint16_t recycled_buffers;
 };
 
 size_t buffer_size(struct ctx *ctx);
