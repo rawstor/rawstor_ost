@@ -7,6 +7,9 @@
 
 #include <stdint.h>
 
+#include "uuid.h"
+#include "backends/file.h"
+
 
 /* If request is larger, on-demand buffer of MAX_BUF_SIZE will be used */
 #define BUFSIZE sizeof(proto_io_frame_t)
@@ -81,18 +84,6 @@ typedef struct
     uint64_t hash;
 } __attribute__((packed)) proto_resp_frame_t;
 
-typedef struct {
-    uint8_t bytes[16];
-} rawstor_uuid;
-
-typedef char rawstor_uuid_string[37];
-
-typedef struct
-{
-    rawstor_uuid id;
-    int fd;
-} obj_t;
-
 // uring eventloop section
 typedef enum
 {
@@ -133,9 +124,8 @@ typedef struct
 typedef struct
 {
     int fd;
-    obj_t obj;
+    BackendObject obj;
     void *in_buf;
-    void *out_buf;
     int32_t in_bytes;
     proto_io_frame_t *op;
     char op_partial_buf[MAX_IN_FRAME_SIZE];

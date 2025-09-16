@@ -9,7 +9,8 @@ AM_CFLAGS = -g -O3 -Wall \
 ost_SOURCES = hash.c \
               ost.c \
               ruring.c \
-              uuid.c
+              uuid.c \
+              backends/file.c
 
 ost_LDADD = $(LIBXXHASH_LIBS) \
             $(LIBURING_LIBS)

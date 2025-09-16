@@ -47,5 +47,4 @@ int add_recv(struct ctx *ctx, int idx, void *user_data);
 int extract_cqe_buffer_idx(struct io_uring_cqe *cqe);
 void *extract_cqe_recv_buf(struct ctx *ctx, struct io_uring_cqe *cqe);
 
-
 #endif // RAWSTOR_RURING_H
