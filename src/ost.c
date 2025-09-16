@@ -2,7 +2,6 @@
 #include "log.h"
 #include "ost.h"
 #include "ruring.h"
-#include "uuid.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,8 +15,8 @@
 
 /* Cheapest storage for our connections */
 conn_t *conns[NUM_CONNS];
-char objdir_path[256];
 struct io_uring ring;
+int server_fd;
 
 /* minimal request */
 static request_t *req_new(req_kind event, int fd)
@@ -74,8 +73,8 @@ static conn_t *setup_conn(int fd)
     conn->fd = fd;
     conn->in_bytes = 0;
     conn->in_buf = malloc(MAX_BUF_SIZE);
-    conn->out_buf = malloc(MAX_BUF_SIZE);
     conn->op = NULL;
+    conn->op_partial_offset = 0;
     return conn;
 }
 
@@ -95,10 +94,9 @@ void close_conn(int fd)
     io_uring_submit(&ring);
 
     free(conns[fd]->in_buf);
-    free(conns[fd]->out_buf);
 
     free(conns[fd]);
-    conns[fd] = 0;
+    conns[fd] = NULL;
 }
 
 inline void block_io_req_reuse(io_request_t *ioreq, req_kind event, uint32_t len)
@@ -152,25 +150,25 @@ static void prep_and_send_resp_frame(int fd, commands_t cmd, uint16_t cid, int r
 static int set_conn_params(conn_t *c, proto_basic_frame_t *frame)
 {
     conn_t *conn = c;
-    // TODO: set valid len
-    memcpy(conn->obj.id.bytes, frame->obj_id, sizeof(conn->obj.id.bytes));
-    char obj_file_path[600];
-    rawstor_uuid_string uuid;
-    rawstor_uuid_to_string(&conn->obj.id, &uuid);
-    sprintf(obj_file_path, "%s/%s", objdir_path, uuid);
-    LOG_INFO("[%i]Set connection objid: %s, obj file:%s\n", conn->fd, uuid, obj_file_path);
     // TODO: validate incoming frame and objid
     if (conn->obj.fd)
     {
-        close(conn->obj.fd);
+        file_backend.close(&conn->obj, &ring, NULL, NULL);
     }
-    conn->obj.fd = open(obj_file_path, O_RDWR | O_CREAT, 0664);
-    if (conn->obj.fd < 0)
+    // TODO: set valid len
+    memcpy(conn->obj.id.bytes, frame->obj_id, sizeof(conn->obj.id.bytes));
+    conn->obj = file_backend.init(&conn->obj.id, NULL);
+    rawstor_uuid_string uuid_str;
+    rawstor_uuid_to_string(&conn->obj.id, &uuid_str);
+    LOG_INFO("[%i]Set connection objid: %s\n", conn->fd, uuid_str);
+    int res = file_backend.open(&conn->obj, &ring, NULL, file_backend.settings);
+    if (res)
     {
         perror("open");
-        close_conn(c->fd);
+        close_conn(conn->fd);
         return 1;
     }
+
     return 0;
 }
 
@@ -201,7 +199,6 @@ int push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf)
         return -errno;
     }
 
-    struct io_uring_sqe *sqe = get_sqe(&ring);
     io_request_t *ioreq = block_io_req_new(IO_KIND_WRITE, conn->fd, frame->cid, frame->len);
     // TODO: optimize memcpy?
     char *nbuf = malloc(frame->len);
@@ -211,16 +208,7 @@ int push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf)
     LOG_DEBUG("[%i]push_block_write: block_fd:%i cid:%u offset:%li len:%i, sync:%i\n",
               conn->fd, conn->obj.fd, conn->op->cid, frame->offset, frame->len, frame->sync);
 
-    if (frame->sync)
-    {
-        io_uring_prep_writev2(sqe, conn->obj.fd, ioreq->iovecs, 1, frame->offset, RWF_SYNC);
-    }
-    else
-    {
-        io_uring_prep_writev(sqe, conn->obj.fd, ioreq->iovecs, 1, frame->offset);
-    }
-
-    io_uring_sqe_set_data(sqe, ioreq);
+    file_backend.writev(&conn->obj, ioreq->iovecs, 1, frame->offset, frame->sync, &ring, ioreq, file_backend.settings);
     io_uring_submit(&ring);
 
     return 0;
@@ -237,11 +225,9 @@ int cmd_process_set_object(conn_t *conn, int fd, void *data, int len)
 int cmd_process_read(conn_t *conn, int fd, void *data, int len)
 {
     /* async read object */
-    struct io_uring_sqe *sqe = get_sqe(&ring);
     io_request_t *nioreq = block_io_req_new(IO_KIND_READ, fd, conn->op->cid, conn->op->len);
     LOG_DEBUG("[%i]CMD_READ: block_fd:%i cid:%u offset:%li len:%i\n", fd, conn->obj.fd, conn->op->cid, conn->op->offset, conn->op->len);
-    io_uring_prep_readv(sqe, conn->obj.fd, nioreq->iovecs, 2, conn->op->offset);
-    io_uring_sqe_set_data(sqe, nioreq);
+    file_backend.readv(&conn->obj, nioreq->iovecs, 2, conn->op->offset, &ring, nioreq, file_backend.settings);
     io_uring_submit(&ring);
     return 0;
 }
@@ -509,7 +495,7 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
          * that we're reusing the request object, but its not special - freeing
          * it and making a new one would also be just fine */
         sqe = get_sqe(&ring);
-        io_uring_prep_accept(sqe, fd, (struct sockaddr *)&areq->addr, &areq->addrlen, 0);
+        io_uring_prep_accept(sqe, server_fd, (struct sockaddr *)&areq->addr, &areq->addrlen, 0);
         io_uring_sqe_set_data(sqe, areq);
         io_uring_submit(&ring);
 
@@ -656,23 +642,16 @@ int main(int argc, char **argv)
     // Client may not be interested in our data, ignore signal and handle write errors explicitly
     signal(SIGPIPE, SIG_IGN);
 
-    /* Use dir to store objects */
-    strlcpy(objdir_path, argv[2], 256);
-    struct stat info;
+    if (init_file_backend(argc, argv))
+    {
+        printf("Backend init error!\n");
+        exit(1);
+    }
 
-    if (stat(objdir_path, &info) != 0)
-    {
-        printf("cannot access %s\n", objdir_path);
-        exit(1);
-    }
-    else if (!S_ISDIR(info.st_mode))
-    {
-        printf("%s is not a directory\n", objdir_path);
-        exit(1);
-    }
+    printf("%s", file_backend.settings->path);
 
     /* create the server socket */
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0)
     {
         perror("socket");
@@ -699,7 +678,7 @@ int main(int argc, char **argv)
        io_uring_prep_sendmsg() SQEs may mix up with each other, which breaks
        stream order guarantees and gives corrupt data!
     */
-    int socketbuf_size = 4096 * CQES;
+    int socketbuf_size = 4096 * CQES * 16;
     if (setsockopt(server_fd, SOL_SOCKET, SO_SNDBUF, &socketbuf_size, sizeof(socketbuf_size)))
     {
         perror("setsockopt");
@@ -710,7 +689,8 @@ int main(int argc, char **argv)
         perror("setsockopt");
         exit(1);
     }
-    LOG_DEBUG("Set new socket buffer size: %d\n", socketbuf_size);
+
+    LOG_INFO("Tried to set new write socket buffer size actual size: %d\n", socketbuf_size);
 
     /* set up the address structure for binding, which is *:<port> */
     struct sockaddr_in sin = {
