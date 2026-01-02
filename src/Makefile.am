@@ -14,6 +14,7 @@ ost_SOURCES = hash.c \
               ruring.c \
               ruring.h \
               uuid.c \
+              uuid.h \
               backends/file.c \
               backends/file.h
 
