@@ -1,5 +1,11 @@
-SUBDIRS = src \
-          examples
+SUBDIRS = src
 
 
 README: README.md
+	cp README.md README
+
+
+EXTRA_DIST = README.md
+
+
+CLEANFILES = README
