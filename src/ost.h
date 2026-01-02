@@ -7,9 +7,8 @@
 
 #include <stdint.h>
 
-#include "uuid.h"
 #include "backends/file.h"
-
+#include "uuid.h"
 
 /* If request is larger, on-demand buffer of MAX_BUF_SIZE will be used */
 #define BUFSIZE sizeof(proto_io_frame_t)
@@ -32,8 +31,7 @@
 // static const int OFFSET_BYTES = sizeof(uint16_t);
 
 // protocol section
-typedef enum
-{
+typedef enum {
     // IO commands
     CMD_SET_OBJECT,
     CMD_READ,
@@ -44,26 +42,24 @@ typedef enum
 } commands_t;
 
 /* Minimal protocol frame (cmd only) */
-typedef struct
-{
+typedef struct {
     uint32_t magic;
     commands_t cmd;
 } __attribute__((packed)) proto_min_frame_t;
 
 /* Basic protocol frame */
-typedef struct
-{
+typedef struct {
     uint32_t magic;
     commands_t cmd;
-    // var is for minimal commands only, will be overridden in other command structs
+    // var is for minimal commands only, will be overridden in other command
+    // structs
     uint8_t obj_id[OBJID_LEN];
     uint64_t offset;
     uint64_t val;
 } __attribute__((packed)) proto_basic_frame_t;
 
 /* IO protocol frame */
-typedef struct
-{
+typedef struct {
     uint32_t magic;
     commands_t cmd;
     uint16_t cid;
@@ -74,19 +70,18 @@ typedef struct
 } __attribute__((packed)) proto_io_frame_t;
 
 /* response frames */
-typedef struct
-{
+typedef struct {
     uint32_t magic;
     commands_t cmd;
     uint16_t cid;
-    // TODO: if we send length in res - it should be the same type (signed-unsigned too)
+    // TODO: if we send length in res - it should be the same type
+    // (signed-unsigned too)
     int32_t res;
     uint64_t hash;
 } __attribute__((packed)) proto_resp_frame_t;
 
 // uring eventloop section
-typedef enum
-{
+typedef enum {
     // network request
     REQ_KIND_ACCEPT,
     REQ_KIND_READ,
@@ -99,35 +94,32 @@ typedef enum
     // IO_KIND_DISCARD
 } req_kind;
 
-typedef struct
-{
+typedef struct {
     req_kind event;
     int fd;
 } request_t;
 
-typedef struct
-{
+typedef struct {
     request_t req;
-    // usually we'll have response frame before actual data, or/and additional iov
+    // usually we'll have response frame before actual data, or/and additional
+    // iov
     struct iovec iovecs[IO_REQ_IOVECS];
     char iobuf[BUFSIZE];
     uint16_t cid;
 } io_request_t;
 
-typedef struct
-{
+typedef struct {
     request_t req;
     struct sockaddr_in addr;
     socklen_t addrlen;
 } accept_request_t;
 
-typedef struct
-{
+typedef struct {
     int fd;
     BackendObject obj;
-    void *in_buf;
+    void* in_buf;
     int32_t in_bytes;
-    proto_io_frame_t *op;
+    proto_io_frame_t* op;
     char op_partial_buf[MAX_IN_FRAME_SIZE];
     uint8_t op_partial_offset;
 } conn_t;

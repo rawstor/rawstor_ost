@@ -1,40 +1,37 @@
+#include "ost.h"
 #include "hash.h"
 #include "log.h"
-#include "ost.h"
 #include "ruring.h"
 
+#include <errno.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/tcp.h>
 #include <sys/ioctl.h>
 #include <sys/param.h>
-#include <errno.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 /* Cheapest storage for our connections */
-conn_t *conns[NUM_CONNS];
+conn_t* conns[NUM_CONNS];
 struct io_uring ring;
 int server_fd;
 
 /* minimal request */
-static request_t *req_new(req_kind event, int fd)
-{
-    request_t *req = malloc(sizeof(request_t));
+static request_t* req_new(req_kind event, int fd) {
+    request_t* req = malloc(sizeof(request_t));
     req->event = event;
     req->fd = fd;
     return req;
 }
 
-inline void req_free(request_t *req)
-{
+inline void req_free(request_t* req) {
     free(req);
 }
 
-inline io_request_t *io_req_new(req_kind event, int fd, uint16_t cid)
-{
-    io_request_t *req = malloc(sizeof(io_request_t));
+inline io_request_t* io_req_new(req_kind event, int fd, uint16_t cid) {
+    io_request_t* req = malloc(sizeof(io_request_t));
     req->req.event = event;
     req->req.fd = fd;
     req->iovecs[0].iov_base = req->iobuf;
@@ -45,31 +42,27 @@ inline io_request_t *io_req_new(req_kind event, int fd, uint16_t cid)
     return req;
 }
 
-inline void io_req_free(io_request_t *ioreq)
-{
-    for (int i = 0; i < IO_REQ_IOVECS; i++)
-    {
+inline void io_req_free(io_request_t* ioreq) {
+    for (int i = 0; i < IO_REQ_IOVECS; i++) {
         LOG_DEBUG("io_req_free: i:%i\n", i);
-        if (ioreq->iovecs[i].iov_len > 0 && ioreq->iovecs[i].iov_base != (void *)ioreq->iobuf)
-        {
+        if (ioreq->iovecs[i].iov_len > 0 &&
+            ioreq->iovecs[i].iov_base != (void*)ioreq->iobuf) {
             free(ioreq->iovecs[i].iov_base);
         }
     }
     free(ioreq);
 }
 
-static accept_request_t *accept_req_new(int fd)
-{
-    accept_request_t *req = malloc(sizeof(accept_request_t));
+static accept_request_t* accept_req_new(int fd) {
+    accept_request_t* req = malloc(sizeof(accept_request_t));
     req->req.event = REQ_KIND_ACCEPT;
     req->req.fd = fd;
     req->addrlen = sizeof(req->addr);
     return req;
 }
 
-static conn_t *setup_conn(int fd)
-{
-    conn_t *conn = malloc(sizeof(conn_t));
+static conn_t* setup_conn(int fd) {
+    conn_t* conn = malloc(sizeof(conn_t));
     conn->fd = fd;
     conn->in_bytes = 0;
     conn->in_buf = malloc(MAX_BUF_SIZE);
@@ -78,17 +71,15 @@ static conn_t *setup_conn(int fd)
     return conn;
 }
 
-void close_conn(int fd)
-{
-    if (conns[fd] == NULL)
-    {
+void close_conn(int fd) {
+    if (conns[fd] == NULL) {
         return;
     }
     /* make a async close request. we use a minimal request object
      * because close has no interesting args or return; we just need a
      * marker so we can recognise the response for what it is */
-    request_t *clreq = req_new(REQ_KIND_CLOSE, fd);
-    struct io_uring_sqe *sqe = get_sqe(&ring);
+    request_t* clreq = req_new(REQ_KIND_CLOSE, fd);
+    struct io_uring_sqe* sqe = get_sqe(&ring);
     io_uring_prep_close(sqe, fd);
     io_uring_sqe_set_data(sqe, clreq);
     io_uring_submit(&ring);
@@ -99,30 +90,27 @@ void close_conn(int fd)
     conns[fd] = NULL;
 }
 
-inline void block_io_req_reuse(io_request_t *ioreq, req_kind event, uint32_t len)
-{
+inline void
+block_io_req_reuse(io_request_t* ioreq, req_kind event, uint32_t len) {
     ioreq->req.event = event;
-    if (len > BUFSIZE)
-    {
+    if (len > BUFSIZE) {
         ioreq->iovecs[1].iov_base = malloc(len - BUFSIZE);
         ioreq->iovecs[1].iov_len = len - BUFSIZE;
-    }
-    else
-    {
+    } else {
         ioreq->iovecs[0].iov_len = len;
     }
 }
 
-inline io_request_t *block_io_req_new(req_kind event, int fd, uint16_t cid, uint32_t len)
-{
-    io_request_t *ioreq = io_req_new(event, fd, cid);
+inline io_request_t*
+block_io_req_new(req_kind event, int fd, uint16_t cid, uint32_t len) {
+    io_request_t* ioreq = io_req_new(event, fd, cid);
     block_io_req_reuse(ioreq, event, len);
     return ioreq;
 }
 
-static proto_resp_frame_t *prep_resp_frame(commands_t cmd, uint16_t cid, int res, XXH64_hash_t hash)
-{
-    proto_resp_frame_t *rframe = malloc(sizeof(proto_resp_frame_t));
+static proto_resp_frame_t*
+prep_resp_frame(commands_t cmd, uint16_t cid, int res, XXH64_hash_t hash) {
+    proto_resp_frame_t* rframe = malloc(sizeof(proto_resp_frame_t));
     rframe->magic = RAWSTOR_MAGIC;
     rframe->cmd = cmd;
     rframe->cid = cid;
@@ -131,28 +119,28 @@ static proto_resp_frame_t *prep_resp_frame(commands_t cmd, uint16_t cid, int res
     return rframe;
 }
 
-static void prep_and_send_resp_frame(int fd, commands_t cmd, uint16_t cid, int res)
-{
-    proto_resp_frame_t *rframe = prep_resp_frame(cmd, cid, res, 0);
+static void
+prep_and_send_resp_frame(int fd, commands_t cmd, uint16_t cid, int res) {
+    proto_resp_frame_t* rframe = prep_resp_frame(cmd, cid, res, 0);
 
-    io_request_t *wreq = io_req_new(REQ_KIND_WRITE, fd, cid);
+    io_request_t* wreq = io_req_new(REQ_KIND_WRITE, fd, cid);
     wreq->iovecs[0].iov_base = rframe;
     wreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
-    struct io_uring_sqe *sqe = get_sqe(&ring);
-    io_uring_prep_write(sqe, fd, wreq->iovecs[0].iov_base, wreq->iovecs[0].iov_len, 0);
+    struct io_uring_sqe* sqe = get_sqe(&ring);
+    io_uring_prep_write(
+        sqe, fd, wreq->iovecs[0].iov_base, wreq->iovecs[0].iov_len, 0
+    );
     io_uring_sqe_set_data(sqe, wreq);
     io_uring_submit(&ring);
 
     // free(rframe);
 }
 
-static int set_conn_params(conn_t *c, proto_basic_frame_t *frame)
-{
-    conn_t *conn = c;
+static int set_conn_params(conn_t* c, proto_basic_frame_t* frame) {
+    conn_t* conn = c;
     // TODO: validate incoming frame and objid
-    if (conn->obj.fd)
-    {
+    if (conn->obj.fd) {
         file_backend.close(&conn->obj, &ring, NULL, NULL);
     }
     // TODO: set valid len
@@ -162,8 +150,7 @@ static int set_conn_params(conn_t *c, proto_basic_frame_t *frame)
     rawstor_uuid_to_string(&conn->obj.id, &uuid_str);
     LOG_INFO("[%i]Set connection objid: %s\n", conn->fd, uuid_str);
     int res = file_backend.open(&conn->obj, &ring, NULL, file_backend.settings);
-    if (res)
-    {
+    if (res) {
         perror("open");
         close_conn(conn->fd);
         return 1;
@@ -172,15 +159,18 @@ static int set_conn_params(conn_t *c, proto_basic_frame_t *frame)
     return 0;
 }
 
-int buffer_in_stream(conn_t *conn, proto_io_frame_t *frame, void *buf, int len)
-{
+int buffer_in_stream(
+    conn_t* conn, proto_io_frame_t* frame, void* buf, int len
+) {
     memcpy(conn->in_buf + conn->in_bytes, buf, len);
     conn->in_bytes += len;
 
-    LOG_DEBUG("in_bytes: %i, now_len:%i, total_len:%i\n", conn->in_bytes, len, frame->len);
+    LOG_DEBUG(
+        "in_bytes: %i, now_len:%i, total_len:%i\n", conn->in_bytes, len,
+        frame->len
+    );
 
-    if (conn->in_bytes > frame->len)
-    {
+    if (conn->in_bytes > frame->len) {
         LOG_INFO("[%i]too much data for incoming write!", conn->fd);
         return 1;
     }
@@ -188,136 +178,175 @@ int buffer_in_stream(conn_t *conn, proto_io_frame_t *frame, void *buf, int len)
     return 0;
 }
 
-int push_block_write(conn_t *conn, proto_io_frame_t *frame, void *buf)
-{
+int push_block_write(conn_t* conn, proto_io_frame_t* frame, void* buf) {
     XXH64_hash_t hash = hash_buf(buf, frame->len);
 
-    if (frame->hash != hash)
-    {
-        FLOG_INFO(stderr, "[%d]Write request data hash mismatch: %zu != %lu\n", conn->fd, frame->hash, hash);
+    if (frame->hash != hash) {
+        FLOG_INFO(
+            stderr, "[%d]Write request data hash mismatch: %zu != %lu\n",
+            conn->fd, frame->hash, hash
+        );
         errno = EIO;
         return -errno;
     }
 
-    io_request_t *ioreq = block_io_req_new(IO_KIND_WRITE, conn->fd, frame->cid, frame->len);
+    io_request_t* ioreq =
+        block_io_req_new(IO_KIND_WRITE, conn->fd, frame->cid, frame->len);
     // TODO: optimize memcpy?
-    char *nbuf = malloc(frame->len);
+    char* nbuf = malloc(frame->len);
     memcpy(nbuf, buf, frame->len);
     ioreq->iovecs[0].iov_base = nbuf;
     ioreq->iovecs[0].iov_len = frame->len;
-    LOG_DEBUG("[%i]push_block_write: block_fd:%i cid:%u offset:%li len:%i, sync:%i\n",
-              conn->fd, conn->obj.fd, conn->op->cid, frame->offset, frame->len, frame->sync);
+    LOG_DEBUG(
+        "[%i]push_block_write: block_fd:%i cid:%u offset:%li len:%i, sync:%i\n",
+        conn->fd, conn->obj.fd, conn->op->cid, frame->offset, frame->len,
+        frame->sync
+    );
 
-    file_backend.writev(&conn->obj, ioreq->iovecs, 1, frame->offset, frame->sync, &ring, ioreq, file_backend.settings);
+    file_backend.writev(
+        &conn->obj, ioreq->iovecs, 1, frame->offset, frame->sync, &ring, ioreq,
+        file_backend.settings
+    );
     io_uring_submit(&ring);
 
     return 0;
 }
 
-int cmd_process_set_object(conn_t *conn, int fd, void *data, int len)
-{
-    proto_basic_frame_t *frame = (proto_basic_frame_t *)data;
+int cmd_process_set_object(conn_t* conn, int fd, void* data, int len) {
+    proto_basic_frame_t* frame = (proto_basic_frame_t*)data;
     int res = set_conn_params(conn, frame);
     prep_and_send_resp_frame(fd, frame->cmd, 0, res);
     return 0;
 }
 
-int cmd_process_read(conn_t *conn, int fd, void *data, int len)
-{
+int cmd_process_read(conn_t* conn, int fd, void* data, int len) {
     /* async read object */
-    io_request_t *nioreq = block_io_req_new(IO_KIND_READ, fd, conn->op->cid, conn->op->len);
-    LOG_DEBUG("[%i]CMD_READ: block_fd:%i cid:%u offset:%li len:%i\n", fd, conn->obj.fd, conn->op->cid, conn->op->offset, conn->op->len);
-    file_backend.readv(&conn->obj, nioreq->iovecs, 2, conn->op->offset, &ring, nioreq, file_backend.settings);
+    io_request_t* nioreq =
+        block_io_req_new(IO_KIND_READ, fd, conn->op->cid, conn->op->len);
+    LOG_DEBUG(
+        "[%i]CMD_READ: block_fd:%i cid:%u offset:%li len:%i\n", fd,
+        conn->obj.fd, conn->op->cid, conn->op->offset, conn->op->len
+    );
+    file_backend.readv(
+        &conn->obj, nioreq->iovecs, 2, conn->op->offset, &ring, nioreq,
+        file_backend.settings
+    );
     io_uring_submit(&ring);
     return 0;
 }
 
-int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_request_t *ioreq)
-{
+int process_recv(
+    struct ctx* ctx, struct io_uring_cqe* cqe, int fd, int res,
+    io_request_t* ioreq
+) {
     int processed_size = 0;
 
     LOG_DEBUG("[%d]process_recv: res:%i\n", fd, res);
-    void *data = extract_cqe_recv_buf(ctx, cqe);
+    void* data = extract_cqe_recv_buf(ctx, cqe);
 
-    if (uring_unlikely(conns[fd] == NULL))
-    {
-        LOG_DEBUG("[%d]process_recv: packet from already disconnected client, ignore\n", fd);
+    if (uring_unlikely(conns[fd] == NULL)) {
+        LOG_DEBUG(
+            "[%d]process_recv: packet from already disconnected client, "
+            "ignore\n",
+            fd
+        );
         goto error;
     }
 
-    conn_t *conn = conns[fd];
+    conn_t* conn = conns[fd];
 
-    while (processed_size < res)
-    {
-        if (conn->op == NULL)
-        {
-            void *fdata = data;
+    while (processed_size < res) {
+        if (conn->op == NULL) {
+            void* fdata = data;
             int fres = res;
             int new_part_size = 0;
 
             // Corner case - previous batch of data had partial frame
-            if (uring_unlikely(conn->op_partial_offset))
-            {
-                new_part_size = MIN(res, MAX_IN_FRAME_SIZE - conn->op_partial_offset);
-                memcpy(conn->op_partial_buf + conn->op_partial_offset, fdata, new_part_size);
+            if (uring_unlikely(conn->op_partial_offset)) {
+                new_part_size =
+                    MIN(res, MAX_IN_FRAME_SIZE - conn->op_partial_offset);
+                memcpy(
+                    conn->op_partial_buf + conn->op_partial_offset, fdata,
+                    new_part_size
+                );
 
                 fdata = conn->op_partial_buf;
                 fres = new_part_size + conn->op_partial_offset;
             }
 
-            if (uring_unlikely(fres < sizeof(proto_min_frame_t)))
-            {
-                FLOG_INFO(stderr, "[%d]Recv data is less than minimal op frame: %i < %lu, use op partial buffer\n", fd, fres, sizeof(proto_min_frame_t));
+            if (uring_unlikely(fres < sizeof(proto_min_frame_t))) {
+                FLOG_INFO(
+                    stderr,
+                    "[%d]Recv data is less than minimal op frame: %i < %lu, "
+                    "use "
+                    "op partial buffer\n",
+                    fd, fres, sizeof(proto_min_frame_t)
+                );
                 goto partial_res;
             }
 
             /* try to cast raw stream bytes into our minimal structs */
-            proto_min_frame_t *mframe = (proto_min_frame_t *)fdata;
+            proto_min_frame_t* mframe = (proto_min_frame_t*)fdata;
 
-            if (uring_unlikely(mframe->magic != RAWSTOR_MAGIC))
-            {
-                FLOG_INFO(stderr, "[%d]FATAL! Frame with wrong magic number:%x != %x, disconnect.\n", fd, mframe->magic, RAWSTOR_MAGIC);
+            if (uring_unlikely(mframe->magic != RAWSTOR_MAGIC)) {
+                FLOG_INFO(
+                    stderr,
+                    "[%d]FATAL! Frame with wrong magic number:%x != %x, "
+                    "disconnect.\n",
+                    fd, mframe->magic, RAWSTOR_MAGIC
+                );
                 prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
                 goto error;
             }
 
             LOG_DEBUG("cmd: %i\n", mframe->cmd);
 
-            if (uring_unlikely(!conn->obj.fd && mframe->cmd != CMD_SET_OBJECT))
-            {
+            if (uring_unlikely(
+                    !conn->obj.fd && mframe->cmd != CMD_SET_OBJECT
+                )) {
                 prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
                 goto error;
             }
 
             /* Some commands won't have additional data */
-            switch (mframe->cmd)
-            {
-            case CMD_SET_OBJECT:
-            {
-                if (uring_unlikely(fres < sizeof(proto_basic_frame_t)))
-                {
-                    FLOG_INFO(stderr, "[%d]CMD_READ recv: data len:%i differs from frame size:%lu, use op partial buffer", fd, fres, sizeof(proto_basic_frame_t));
+            switch (mframe->cmd) {
+            case CMD_SET_OBJECT: {
+                if (uring_unlikely(fres < sizeof(proto_basic_frame_t))) {
+                    FLOG_INFO(
+                        stderr,
+                        "[%d]CMD_READ recv: data len:%i differs from frame "
+                        "size:%lu, use op partial buffer",
+                        fd, fres, sizeof(proto_basic_frame_t)
+                    );
                     goto partial_res;
                 }
                 cmd_process_set_object(conn, fd, fdata, 0);
-                processed_size = sizeof(proto_basic_frame_t) - conn->op_partial_offset;
+                processed_size =
+                    sizeof(proto_basic_frame_t) - conn->op_partial_offset;
                 goto next_iter;
                 break;
             }
-            default:
-            {
-                if (uring_unlikely(fres < sizeof(proto_io_frame_t)))
-                {
-                    FLOG_INFO(stderr, "[%d]CMD_READ recv: data len:%i differs from frame size:%lu, use op partial buffer", fd, fres, sizeof(proto_io_frame_t));
+            default: {
+                if (uring_unlikely(fres < sizeof(proto_io_frame_t))) {
+                    FLOG_INFO(
+                        stderr,
+                        "[%d]CMD_READ recv: data len:%i differs from frame "
+                        "size:%lu, use op partial buffer",
+                        fd, fres, sizeof(proto_io_frame_t)
+                    );
                     goto partial_res;
                 }
 
                 /* Buffer may be reused on long multipart recv */
                 conn->op = malloc(sizeof(proto_io_frame_t));
                 memcpy(conn->op, mframe, sizeof(proto_io_frame_t));
-                LOG_DEBUG("[%d]process_recv: set new op:%i cid:%u\n", fd, conn->op->cmd, conn->op->cid);
+                LOG_DEBUG(
+                    "[%d]process_recv: set new op:%i cid:%u\n", fd,
+                    conn->op->cmd, conn->op->cid
+                );
 
-                processed_size = sizeof(proto_io_frame_t) - conn->op_partial_offset;
+                processed_size =
+                    sizeof(proto_io_frame_t) - conn->op_partial_offset;
                 data = data + processed_size;
                 res = res - processed_size;
                 processed_size = 0;
@@ -325,35 +354,32 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
             }
         }
 
-        switch (conn->op->cmd)
-        {
-        case CMD_READ:
-        {
+        switch (conn->op->cmd) {
+        case CMD_READ: {
             cmd_process_read(conn, fd, data, 0);
             goto out_free_op;
             break;
         }
-        case CMD_WRITE:
-        {
+        case CMD_WRITE: {
             /* Fast path, when full data is already here */
-            if (conn->in_bytes == 0 && res >= conn->op->len)
-            {
+            if (conn->in_bytes == 0 && res >= conn->op->len) {
                 if (push_block_write(conn, conn->op, data))
                     goto error;
                 processed_size = conn->op->len;
                 goto out_free_op;
             }
 
-            LOG_DEBUG("CMD_WRITE: got part of data, use slow path with buffer. Remaining:%i, actual:%i\n",
-                      conn->op->len - conn->in_bytes, res);
+            LOG_DEBUG(
+                "CMD_WRITE: got part of data, use slow path with buffer. "
+                "Remaining:%i, actual:%i\n",
+                conn->op->len - conn->in_bytes, res
+            );
             processed_size = MIN(res, conn->op->len - conn->in_bytes);
-            if (buffer_in_stream(conn, conn->op, data, processed_size))
-            {
+            if (buffer_in_stream(conn, conn->op, data, processed_size)) {
                 goto error;
             }
 
-            if (conn->in_bytes == conn->op->len)
-            {
+            if (conn->in_bytes == conn->op->len) {
                 if (push_block_write(conn, conn->op, conn->in_buf))
                     goto error;
                 memset(conn->in_buf, 0, conn->in_bytes);
@@ -361,9 +387,13 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
                 goto out_free_op;
             }
 
-            if (conn->in_bytes > conn->op->len)
-            {
-                FLOG_INFO(stderr, "[%d]Unexpected state: conn->in_bytes:%u > conn->op->len:%u\n", fd, conn->in_bytes, conn->op->len);
+            if (conn->in_bytes > conn->op->len) {
+                FLOG_INFO(
+                    stderr,
+                    "[%d]Unexpected state: conn->in_bytes:%u > "
+                    "conn->op->len:%u\n",
+                    fd, conn->in_bytes, conn->op->len
+                );
                 goto error;
             }
 
@@ -371,7 +401,9 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
             break;
         }
         default:
-            FLOG_INFO(stderr, "[%d]Unknown proto command: %i\n", fd, conn->op->cmd);
+            FLOG_INFO(
+                stderr, "[%d]Unknown proto command: %i\n", fd, conn->op->cmd
+            );
             goto error;
             break;
         }
@@ -384,8 +416,7 @@ int process_recv(struct ctx *ctx, struct io_uring_cqe *cqe, int fd, int res, io_
         data = data + processed_size;
         res = res - processed_size;
         processed_size = 0;
-        if (uring_unlikely(conn->op_partial_offset))
-        {
+        if (uring_unlikely(conn->op_partial_offset)) {
             // Note: clean conn->op_partial_buf too?
             conn->op_partial_offset = 0;
         }
@@ -405,11 +436,14 @@ error:
     return 1;
 }
 
-void io_process_read(int fd, int res, io_request_t *ioreq)
-{
+void io_process_read(int fd, int res, io_request_t* ioreq) {
     XXH64_hash_t hash = hash_vector(ioreq->iovecs, 2);
 
-    LOG_DEBUG("[%d]io_process_read: cid:%u res:%i len:%li hash: %lu\n", fd, ioreq->cid, res, ioreq->iovecs[0].iov_len + ioreq->iovecs[1].iov_len, hash);
+    LOG_DEBUG(
+        "[%d]io_process_read: cid:%u res:%i len:%li hash: %lu\n", fd,
+        ioreq->cid, res, ioreq->iovecs[0].iov_len + ioreq->iovecs[1].iov_len,
+        hash
+    );
 
     // Reuse ioreq to minimize allocations
     ioreq->req.event = REQ_KIND_WRITE;
@@ -418,15 +452,14 @@ void io_process_read(int fd, int res, io_request_t *ioreq)
     ioreq->iovecs[2] = ioreq->iovecs[1];
     ioreq->iovecs[1] = ioreq->iovecs[0];
 
-    proto_resp_frame_t *rframe = prep_resp_frame(CMD_READ, ioreq->cid, res, hash);
+    proto_resp_frame_t* rframe =
+        prep_resp_frame(CMD_READ, ioreq->cid, res, hash);
     ioreq->iovecs[0].iov_base = rframe;
     ioreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
-    struct msghdr msg = {
-        .msg_iov = ioreq->iovecs,
-        .msg_iovlen = 3};
+    struct msghdr msg = {.msg_iov = ioreq->iovecs, .msg_iovlen = 3};
 
-    struct io_uring_sqe *sqe = get_sqe(&ring);
+    struct io_uring_sqe* sqe = get_sqe(&ring);
     /* Don't use MSG_WAITALL, because with many simultaneous
        io_uring_prep_sendmsg() inflight SQEs we may get mixed-up responses
        */
@@ -435,20 +468,18 @@ void io_process_read(int fd, int res, io_request_t *ioreq)
     io_uring_submit(&ring);
 }
 
-void io_process_write(int fd, int res, io_request_t *ioreq)
-{
+void io_process_write(int fd, int res, io_request_t* ioreq) {
     LOG_DEBUG("[%d]block_write: cid:%u res:%i\n", fd, ioreq->cid, res);
 
     prep_and_send_resp_frame(fd, CMD_WRITE, ioreq->cid, res);
 }
 
-static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
-{
+static int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe) {
     int ret = 0;
-    struct io_uring_sqe *sqe;
+    struct io_uring_sqe* sqe;
 
     /* get our own request back. for the moment, just the header */
-    request_t *req = (request_t *)cqe->user_data;
+    request_t* req = (request_t*)cqe->user_data;
     int fd = req->fd;
 
     /* the return value of the underlying syscall. typically a negative value
@@ -457,26 +488,24 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
     int res = cqe->res;
 
     /* do the right thing depending on what kind of request just completed */
-    switch (req->event)
-    {
+    switch (req->event) {
 
     /* someone connected! */
-    case REQ_KIND_ACCEPT:
-    {
+    case REQ_KIND_ACCEPT: {
         /* get a handle on the more specialised request */
-        accept_request_t *areq = (accept_request_t *)req;
+        accept_request_t* areq = (accept_request_t*)req;
 
         /* maybe it failed? */
-        if (res < 0)
-        {
+        if (res < 0) {
             /* note negation of return value in place of errno */
             FLOG_INFO(stderr, "accept: %s\n", strerror(-res));
-        }
-        else
-        {
-            /* hello! client address is in the req object, because that's what we
-             * pointed the request to in io_uring_prep_accept */
-            LOG_INFO("[%d]Connect from %s:%d\n", res, inet_ntoa(areq->addr.sin_addr), ntohs(areq->addr.sin_port));
+        } else {
+            /* hello! client address is in the req object, because that's what
+             * we pointed the request to in io_uring_prep_accept */
+            LOG_INFO(
+                "[%d]Connect from %s:%d\n", res, inet_ntoa(areq->addr.sin_addr),
+                ntohs(areq->addr.sin_port)
+            );
 
             /* remember our new connection. in a real server, you'd create a
              * connection or user object of some sort, maybe send them a
@@ -485,8 +514,9 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
             conns[res] = setup_conn(res);
 
             /* set up an async read for the new connection */
-            io_request_t *ioreq = io_req_new(REQ_KIND_READ, res, 0);
-            /* Don't try to reuse this ioreq! It'll be reused for recv_multishot! */
+            io_request_t* ioreq = io_req_new(REQ_KIND_READ, res, 0);
+            /* Don't try to reuse this ioreq! It'll be reused for
+             * recv_multishot! */
             add_recv(ctx, res, ioreq);
             io_uring_submit(&ring);
         }
@@ -495,7 +525,9 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
          * that we're reusing the request object, but its not special - freeing
          * it and making a new one would also be just fine */
         sqe = get_sqe(&ring);
-        io_uring_prep_accept(sqe, server_fd, (struct sockaddr *)&areq->addr, &areq->addrlen, 0);
+        io_uring_prep_accept(
+            sqe, server_fd, (struct sockaddr*)&areq->addr, &areq->addrlen, 0
+        );
         io_uring_sqe_set_data(sqe, areq);
         io_uring_submit(&ring);
 
@@ -503,26 +535,25 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
     }
 
     /* someone sent something */
-    case REQ_KIND_READ:
-    {
-        /* Important - ioreq will be reused for same connection in recv_multishot, don't touch it! */
+    case REQ_KIND_READ: {
+        /* Important - ioreq will be reused for same connection in
+         * recv_multishot, don't touch it! */
         /* get a handle on the more specialised request */
-        io_request_t *ioreq = (io_request_t *)req;
+        io_request_t* ioreq = (io_request_t*)req;
 
         /* some error, disconnect them */
-        if (res < 0)
-        {
+        if (res < 0) {
             FLOG_INFO(stderr, "readv(%d): %i %s\n", fd, res, strerror(-res));
 
             close_conn(fd);
 
-            /* free the read request, since we're not going to be reissuing it */
+            /* free the read request, since we're not going to be reissuing it
+             */
             io_req_free(ioreq);
         }
 
         /* zero read, they gracefully closed the connection */
-        else if (uring_unlikely(res == 0))
-        {
+        else if (uring_unlikely(res == 0)) {
             LOG_INFO("[%d]closed\n", fd);
 
             /* see error block above, this is the same behaviour */
@@ -531,13 +562,14 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
             io_req_free(ioreq);
         }
 
-        else
-        {
+        else {
             /* they sent some data, which is now in the request iobuf (via the
              * iovecs we sent in) */
-            if (!(cqe->flags & IORING_CQE_F_MORE) && conns[fd] != NULL)
-            {
-                LOG_DEBUG("Incoming cqe didn't have IORING_CQE_F_MORE flag! Recreate recv event\n");
+            if (!(cqe->flags & IORING_CQE_F_MORE) && conns[fd] != NULL) {
+                LOG_DEBUG(
+                    "Incoming cqe didn't have IORING_CQE_F_MORE flag! Recreate "
+                    "recv event\n"
+                );
 
                 /* set up an async read for the new connection */
                 add_recv(ctx, res, ioreq);
@@ -548,9 +580,11 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
             }
             // process_read(ctx, cqe, fd, res, rreq);
             ret = process_recv(ctx, cqe, fd, res, ioreq);
-            if (ret)
-            {
-                FLOG_DEBUG(stderr, "[%d]process_recv returned %i, disconnect client\n", fd, ret);
+            if (ret) {
+                FLOG_DEBUG(
+                    stderr, "[%d]process_recv returned %i, disconnect client\n",
+                    fd, ret
+                );
                 // TODO: client doesn't see disconnection
                 close_conn(fd);
             }
@@ -560,21 +594,23 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
     }
 
     /* they finished receiving what we sent */
-    case REQ_KIND_WRITE:
-    {
-        io_request_t *ioreq = (io_request_t *)cqe->user_data;
+    case REQ_KIND_WRITE: {
+        io_request_t* ioreq = (io_request_t*)cqe->user_data;
         /* failed write, so disconnect them */
-        if (res < 0)
-        {
-            FLOG_INFO(stderr, "[%d](%u)REQ_KIND_WRITE: err %s\n", fd, ioreq->cid, strerror(-res));
+        if (res < 0) {
+            FLOG_INFO(
+                stderr, "[%d](%u)REQ_KIND_WRITE: err %s\n", fd, ioreq->cid,
+                strerror(-res)
+            );
             io_req_free(ioreq);
 
             /* see read error handling */
             close_conn(fd);
-        }
-        else
-        {
-            FLOG_DEBUG(stderr, "[%d](%u)REQ_KIND_WRITE success: %i\n", fd, ioreq->cid, res);
+        } else {
+            FLOG_DEBUG(
+                stderr, "[%d](%u)REQ_KIND_WRITE success: %i\n", fd, ioreq->cid,
+                res
+            );
             /* written successfully, so just free req */
             io_req_free(ioreq);
         }
@@ -585,18 +621,16 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
     }
 
     /* async close completed */
-    case REQ_KIND_CLOSE:
-    {
+    case REQ_KIND_CLOSE: {
         /* just free the request, we've already cleaned up and there's nothing
          * useful we could do if the close failed anyway */
         req_free(req);
         break;
     }
     /* Block read came back */
-    case IO_KIND_READ:
-    {
+    case IO_KIND_READ: {
         /* get a handle on the more specialised request */
-        io_request_t *ioreq = (io_request_t *)req;
+        io_request_t* ioreq = (io_request_t*)req;
 
         // TODO: handle read errors
         io_process_read(fd, res, ioreq);
@@ -604,46 +638,46 @@ static int handle_cqe(struct ctx *ctx, struct io_uring_cqe *cqe)
         break;
     }
     /* Block write came back */
-    case IO_KIND_WRITE:
-    {
+    case IO_KIND_WRITE: {
         /* get a handle on the more specialised request */
-        io_request_t *ioreq = (io_request_t *)cqe->user_data;
+        io_request_t* ioreq = (io_request_t*)cqe->user_data;
 
         io_process_write(fd, res, ioreq);
         io_req_free(ioreq);
 
         break;
     }
-    default:
-    {
-        FLOG_INFO(stderr, "[%d]handle_cqe: get cqe without useful user_data? req->event:%i, res:%i, user_data:%llu\n", fd, req->event, res, cqe->user_data);
+    default: {
+        FLOG_INFO(
+            stderr,
+            "[%d]handle_cqe: get cqe without useful user_data? "
+            "req->event:%i, res:%i, user_data:%llu\n",
+            fd, req->event, res, cqe->user_data
+        );
     }
     }
     return ret;
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char** argv) {
     int ret;
 
-    if (argc < 3)
-    {
+    if (argc < 3) {
         printf("usage: %s <port> <path_to_objdir>\n", argv[0]);
         exit(1);
     }
 
     int port = atoi(argv[1]);
-    if (port <= 0)
-    {
+    if (port <= 0) {
         printf("'%s' not a valid port number\n", argv[1]);
         exit(1);
     }
 
-    // Client may not be interested in our data, ignore signal and handle write errors explicitly
+    // Client may not be interested in our data, ignore signal and handle write
+    // errors explicitly
     signal(SIGPIPE, SIG_IGN);
 
-    if (init_file_backend(argc, argv))
-    {
+    if (init_file_backend(argc, argv)) {
         printf("Backend init error!\n");
         exit(1);
     }
@@ -652,8 +686,7 @@ int main(int argc, char **argv)
 
     /* create the server socket */
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0)
-    {
+    if (server_fd < 0) {
         perror("socket");
         exit(1);
     }
@@ -662,13 +695,13 @@ int main(int argc, char **argv)
      * marginally "less safe" (for a whole bunch of obscure reasons) but allows
      * us to kill and restart the program with ease */
     int onoff = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &onoff, sizeof(onoff)) < 0)
-    {
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &onoff, sizeof(onoff)) <
+        0) {
         perror("setsockopt");
         exit(1);
     }
-    if (setsockopt(server_fd, IPPROTO_TCP, TCP_NODELAY, &onoff, sizeof(onoff)) < 0)
-    {
+    if (setsockopt(server_fd, IPPROTO_TCP, TCP_NODELAY, &onoff, sizeof(onoff)) <
+        0) {
         perror("setsockopt");
         exit(1);
     }
@@ -679,37 +712,42 @@ int main(int argc, char **argv)
        stream order guarantees and gives corrupt data!
     */
     int socketbuf_size = 4096 * CQES * 16;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_SNDBUF, &socketbuf_size, sizeof(socketbuf_size)))
-    {
+    if (setsockopt(
+            server_fd, SOL_SOCKET, SO_SNDBUF, &socketbuf_size,
+            sizeof(socketbuf_size)
+        )) {
         perror("setsockopt");
         exit(1);
     }
-    if (setsockopt(server_fd, SOL_SOCKET, SO_RCVBUF, &socketbuf_size, sizeof(socketbuf_size)))
-    {
+    if (setsockopt(
+            server_fd, SOL_SOCKET, SO_RCVBUF, &socketbuf_size,
+            sizeof(socketbuf_size)
+        )) {
         perror("setsockopt");
         exit(1);
     }
 
-    LOG_INFO("Tried to set new write socket buffer size actual size: %d\n", socketbuf_size);
+    LOG_INFO(
+        "Tried to set new write socket buffer size actual size: %d\n",
+        socketbuf_size
+    );
 
     /* set up the address structure for binding, which is *:<port> */
     struct sockaddr_in sin = {
         .sin_family = AF_INET,
         .sin_port = htons(port),
-        .sin_addr = {
-            .s_addr = htonl(INADDR_ANY)}};
+        .sin_addr = {.s_addr = htonl(INADDR_ANY)}
+    };
     socklen_t sin_len = sizeof(sin);
 
     /* bind the server socket to the wanted address */
-    if (bind(server_fd, (struct sockaddr *)&sin, sin_len) < 0)
-    {
+    if (bind(server_fd, (struct sockaddr*)&sin, sin_len) < 0) {
         perror("bind");
         exit(1);
     }
 
     /* and open it for connections! */
-    if (listen(server_fd, 10) < 0)
-    {
+    if (listen(server_fd, 10) < 0) {
         perror("listen");
         exit(1);
     }
@@ -721,16 +759,14 @@ int main(int argc, char **argv)
     ctx.af = AF_INET;
     ctx.buf_shift = BUF_SHIFT;
 
-    if (setup_context(&ctx))
-    {
+    if (setup_context(&ctx)) {
         return 1;
     }
 
     memset(&conns, 0, sizeof(conns));
 
     ret = io_uring_register_files(ctx.ring, &server_fd, 1);
-    if (ret)
-    {
+    if (ret) {
         fprintf(stderr, "register files: %s\n", strerror(-ret));
         return -1;
     }
@@ -741,21 +777,22 @@ int main(int argc, char **argv)
      *
      * we acquire a free submission queue entry (SQE) from the kernel, set it up
      * for the an async accept(), include our own request state so we can
-     * understand the completion queue entry (CQE) that comes back, and submit it
-     * for processing */
-    struct io_uring_sqe *sqe = get_sqe(&ring);
-    accept_request_t *req = accept_req_new(server_fd);
-    io_uring_prep_accept(sqe, server_fd, (struct sockaddr *)&req->addr, &req->addrlen, 0);
+     * understand the completion queue entry (CQE) that comes back, and submit
+     * it for processing */
+    struct io_uring_sqe* sqe = get_sqe(&ring);
+    accept_request_t* req = accept_req_new(server_fd);
+    io_uring_prep_accept(
+        sqe, server_fd, (struct sockaddr*)&req->addr, &req->addrlen, 0
+    );
     io_uring_sqe_set_data(sqe, req);
     io_uring_submit(&ring);
 
     // struct __kernel_timespec active_ts = {0, 1000};
 
     /* main loop. we just wait until a CQE is available, then process it */
-    struct io_uring_cqe *cqe;
+    struct io_uring_cqe* cqe;
 
-    while (1)
-    {
+    while (1) {
         unsigned head;
         unsigned int i = 0;
         // int ret;
@@ -763,8 +800,7 @@ int main(int argc, char **argv)
         // For single connection it may only worsen IOPS
         // io_uring_submit_and_wait_timeout(&ring, &cqe, 10, &active_ts, NULL);
 
-        io_uring_for_each_cqe(&ring, head, cqe)
-        {
+        io_uring_for_each_cqe(&ring, head, cqe) {
             handle_cqe(&ctx, cqe);
             i++;
         }
@@ -772,17 +808,18 @@ int main(int argc, char **argv)
         io_uring_submit(&ring);
         advance_recycled_buffers(&ctx);
 
-        if (i)
-        {
+        if (i) {
             io_uring_cq_advance(&ring, i);
         }
 
-        LOG_DEBUG("Main_loop: processed %i cqes via io_uring_for_each_cqe\n", i);
+        LOG_DEBUG(
+            "Main_loop: processed %i cqes via io_uring_for_each_cqe\n", i
+        );
         LOG_DEBUG("Unconsumed SQEs: %u\n", io_uring_sq_ready(ctx.ring));
 
-        /* We already processed what we could, now wait for new events, we'll process them in next loop */
-        if (io_uring_wait_cqe(&ring, &cqe) < 0)
-        {
+        /* We already processed what we could, now wait for new events, we'll
+         * process them in next loop */
+        if (io_uring_wait_cqe(&ring, &cqe) < 0) {
             perror("io_uring_wait_cqe");
             exit(1);
         }
