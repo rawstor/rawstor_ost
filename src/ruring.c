@@ -92,7 +92,7 @@ int setup_context(struct ctx* ctx) {
 
     memset(&params, 0, sizeof(params));
     params.cq_entries = CQES;
-    params.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_COOP_TASKRUN |
+    params.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_DEFER_TASKRUN |
                    IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER;
 
     ret = io_uring_queue_init_params(CQES, ctx->ring, &params);
