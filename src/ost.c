@@ -806,11 +806,7 @@ int main(int argc, char** argv) {
         }
 
         io_uring_submit(&ring);
-        advance_recycled_buffers(&ctx);
-
-        if (i) {
-            io_uring_cq_advance(&ring, i);
-        }
+        advance_recycled_buffers_and_cqes(&ctx, i);
 
         LOG_DEBUG(
             "Main_loop: processed %i cqes via io_uring_for_each_cqe\n", i

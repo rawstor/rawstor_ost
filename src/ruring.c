@@ -24,12 +24,12 @@ void recycle_buffer(struct ctx* ctx, int idx) {
     );
 }
 
-inline void advance_recycled_buffers(struct ctx* ctx) {
-    if (ctx->recycled_buffers) {
+inline void advance_recycled_buffers_and_cqes(struct ctx* ctx, int cnum) {
+    if (ctx->recycled_buffers || cnum) {
         LOG_DEBUG(
-            "advance_recycled_buffers: %i buffers\n", ctx->recycled_buffers
+            "advance_recycled_buffers_and_cqes: %i buffers %i cqes\n", ctx->recycled_buffers, cnum
         );
-        io_uring_buf_ring_advance(ctx->buf_ring, ctx->recycled_buffers);
+        __io_uring_buf_ring_cq_advance(ctx->ring, ctx->buf_ring, cnum, ctx->recycled_buffers);
         ctx->recycled_buffers = 0;
     }
 }

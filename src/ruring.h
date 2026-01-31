@@ -32,7 +32,7 @@ struct ctx {
 size_t buffer_size(struct ctx* ctx);
 unsigned char* get_buffer(struct ctx* ctx, int idx);
 void recycle_buffer(struct ctx* ctx, int idx);
-void advance_recycled_buffers(struct ctx* ctx);
+void advance_recycled_buffers_and_cqes(struct ctx* ctx, int cnum);
 
 int setup_buffer_pool(struct ctx* ctx);
 int setup_context(struct ctx* ctx);
