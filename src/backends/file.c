@@ -143,6 +143,13 @@ int init_file_backend(int argc, char** argv) {
     return 0;
 }
 
+void cleanup_file_backend() {
+    if (file_backend.settings) {
+        free(file_backend.settings);
+        file_backend.settings = NULL;
+    }
+}
+
 // Define the file-based storage backend as a struct with function pointers
 Backend file_backend = {
     .init = file_init,

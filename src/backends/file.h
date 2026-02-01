@@ -117,6 +117,7 @@ int file_allocate(
 );
 
 int init_file_backend(int argc, char** argv);
+void cleanup_file_backend();
 #endif // RAWSTOR_FILEBACKEND_H
 
 extern Backend file_backend;

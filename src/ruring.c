@@ -27,9 +27,12 @@ void recycle_buffer(struct ctx* ctx, int idx) {
 inline void advance_recycled_buffers_and_cqes(struct ctx* ctx, int cnum) {
     if (ctx->recycled_buffers || cnum) {
         LOG_DEBUG(
-            "advance_recycled_buffers_and_cqes: %i buffers %i cqes\n", ctx->recycled_buffers, cnum
+            "advance_recycled_buffers_and_cqes: %i buffers %i cqes\n",
+            ctx->recycled_buffers, cnum
         );
-        __io_uring_buf_ring_cq_advance(ctx->ring, ctx->buf_ring, cnum, ctx->recycled_buffers);
+        __io_uring_buf_ring_cq_advance(
+            ctx->ring, ctx->buf_ring, cnum, ctx->recycled_buffers
+        );
         ctx->recycled_buffers = 0;
     }
 }
@@ -45,7 +48,10 @@ int setup_buffer_pool(struct ctx* ctx) {
         (sizeof(struct io_uring_buf) + buffer_size(ctx)) * BUFFERS;
     mapped = mmap(
         NULL, ctx->buf_ring_size, PROT_READ | PROT_WRITE,
-        MAP_ANONYMOUS | MAP_PRIVATE, 0, 0
+        MAP_ANONYMOUS |
+            MAP_PRIVATE //| MAP_HUGETLB | MAP_HUGE_2MB //MAP_HUGE_1GB
+        ,
+        -1, 0
     );
     if (mapped == MAP_FAILED) {
         fprintf(stderr, "buf_ring mmap: %s\n", strerror(errno));

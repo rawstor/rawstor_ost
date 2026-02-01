@@ -104,8 +104,10 @@ typedef struct {
     // usually we'll have response frame before actual data, or/and additional
     // iov
     struct iovec iovecs[IO_REQ_IOVECS];
+    struct msghdr msg;
     char iobuf[BUFSIZE];
     uint16_t cid;
+    proto_resp_frame_t* proto_frame;
 } io_request_t;
 
 typedef struct {
@@ -123,5 +125,34 @@ typedef struct {
     char op_partial_buf[MAX_IN_FRAME_SIZE];
     uint8_t op_partial_offset;
 } conn_t;
+
+// Function declarations
+extern inline void req_free(request_t* req);
+extern inline io_request_t* io_req_new(req_kind event, int fd, uint16_t cid);
+extern inline void io_req_free(io_request_t* ioreq);
+extern inline void
+block_io_req_reuse(io_request_t* ioreq, req_kind event, uint32_t len);
+extern inline io_request_t*
+block_io_req_new(req_kind event, int fd, uint16_t cid, uint32_t len);
+
+// Function declarations
+accept_request_t* accept_req_new(int fd);
+conn_t* setup_conn(int fd);
+void close_conn(int fd);
+proto_resp_frame_t*
+prep_resp_frame(commands_t cmd, uint16_t cid, int res, uint64_t hash);
+void prep_and_send_resp_frame(int fd, commands_t cmd, uint16_t cid, int res);
+int set_conn_params(conn_t* c, proto_basic_frame_t* frame);
+int buffer_in_stream(conn_t* conn, proto_io_frame_t* frame, void* buf, int len);
+int push_block_write(conn_t* conn, proto_io_frame_t* frame, void* buf);
+int cmd_process_set_object(conn_t* conn, int fd, void* data, int len);
+int cmd_process_read(conn_t* conn, int fd, void* data, int len);
+int process_recv(
+    struct ctx* ctx, struct io_uring_cqe* cqe, int fd, int res,
+    io_request_t* ioreq
+);
+void io_process_read(int fd, int res, io_request_t* ioreq);
+void io_process_write(int fd, int res, io_request_t* ioreq);
+static int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe);
 
 #endif // RAWSTOR_OST_H
