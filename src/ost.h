@@ -7,7 +7,7 @@
 
 #include <stdint.h>
 
-#include "backends/file.h"
+#include "backends/backend.h"
 #include "uuid.h"
 
 /* If request is larger, on-demand buffer of MAX_BUF_SIZE will be used */

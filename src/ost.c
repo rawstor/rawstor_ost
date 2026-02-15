@@ -15,6 +15,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/* Global backend instance */
+static Backend g_backend;
+
 /* Cheapest storage for our connections */
 conn_t* conns[NUM_CONNS];
 struct io_uring ring;
@@ -195,17 +198,19 @@ void prep_and_send_resp_frame(int fd, commands_t cmd, uint16_t cid, int res) {
 
 int set_conn_params(conn_t* c, proto_basic_frame_t* frame) {
     conn_t* conn = c;
+    Backend* backend = &g_backend;
+    
     // TODO: validate incoming frame and objid
     if (conn->obj.fd) {
-        file_backend.close(&conn->obj, &ring, NULL, NULL);
+        backend->close(&conn->obj, &ring, NULL, backend);
     }
     // TODO: set valid len
     memcpy(conn->obj.id.bytes, frame->obj_id, sizeof(conn->obj.id.bytes));
-    conn->obj = file_backend.init(&conn->obj.id, NULL);
+    conn->obj = backend->init(&conn->obj.id, backend);
     rawstor_uuid_string uuid_str;
     rawstor_uuid_to_string(&conn->obj.id, &uuid_str);
     LOG_INFO("[%i]Set connection objid: %s\n", conn->fd, uuid_str);
-    int res = file_backend.open(&conn->obj, &ring, NULL, file_backend.settings);
+    int res = backend->open(&conn->obj, &ring, NULL, backend);
     if (res) {
         perror("open");
         close_conn(conn->fd);
@@ -235,6 +240,7 @@ int buffer_in_stream(
 }
 
 int push_block_write(conn_t* conn, proto_io_frame_t* frame, void* buf) {
+    Backend* backend = &g_backend;
     XXH64_hash_t hash = hash_buf(buf, frame->len);
 
     if (frame->hash != hash) {
@@ -280,9 +286,9 @@ int push_block_write(conn_t* conn, proto_io_frame_t* frame, void* buf) {
         frame->sync
     );
 
-    file_backend.writev(
+    backend->writev(
         &conn->obj, ioreq->iovecs, (frame->len <= BUFSIZE) ? 1 : 2,
-        frame->offset, frame->sync, &ring, ioreq, file_backend.settings
+        frame->offset, frame->sync, &ring, ioreq, backend
     );
     io_uring_submit(&ring);
 
@@ -297,6 +303,7 @@ int cmd_process_set_object(conn_t* conn, int fd, void* data, int len) {
 }
 
 int cmd_process_read(conn_t* conn, int fd, void* data, int len) {
+    Backend* backend = &g_backend;
     /* async read object */
     io_request_t* nioreq =
         block_io_req_new(IO_KIND_READ, fd, conn->op->cid, conn->op->len);
@@ -304,9 +311,9 @@ int cmd_process_read(conn_t* conn, int fd, void* data, int len) {
         "[%i]CMD_READ: block_fd:%i cid:%u offset:%li len:%i\n", fd,
         conn->obj.fd, conn->op->cid, conn->op->offset, conn->op->len
     );
-    file_backend.readv(
+    backend->readv(
         &conn->obj, nioreq->iovecs, 2, conn->op->offset, &ring, nioreq,
-        file_backend.settings
+        backend
     );
     io_uring_submit(&ring);
     return 0;
@@ -745,11 +752,21 @@ static int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe) {
     return ret;
 }
 
+// Parse --backend argument from command line
+static const char* parse_backend_arg(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--backend=", 10) == 0) {
+            return argv[i] + 10; // Return pointer to value after "--backend="
+        }
+    }
+    return "file"; // Default to file backend
+}
+
 int main(int argc, char** argv) {
     int ret;
 
     if (argc < 3) {
-        printf("usage: %s <port> <path_to_objdir>\n", argv[0]);
+        printf("usage: %s <port> <path_or_zpool> [--backend=file|zfs] [--zpool=<name>] [--dataset=<path>] [--vol-size=<size>]\n", argv[0]);
         exit(1);
     }
 
@@ -769,14 +786,32 @@ int main(int argc, char** argv) {
     // errors explicitly
     signal(SIGPIPE, SIG_IGN);
 
-    if (init_file_backend(argc, argv)) {
-        printf("Backend init error!\n");
+    // Parse backend type from arguments
+    const char* backend_type = parse_backend_arg(argc, argv);
+    
+    // Initialize the selected backend
+    if (strcmp(backend_type, "zfs") == 0) {
+        LOG_INFO("Initializing ZFS backend...\n");
+        if (init_zfs_backend(argc, argv, &g_backend) != 0) {
+            printf("ZFS backend initialization failed!\n");
+            cleanup_memory_pools();
+            exit(1);
+        }
+    } else if (strcmp(backend_type, "file") == 0) {
+        LOG_INFO("Initializing file backend...\n");
+        if (init_file_backend(argc, argv, &g_backend) != 0) {
+            printf("File backend initialization failed!\n");
+            cleanup_memory_pools();
+            exit(1);
+        }
+    } else {
+        printf("Unknown backend type: %s\n", backend_type);
+        printf("Supported backends: file, zfs\n");
         cleanup_memory_pools();
         exit(1);
     }
-
-    printf("%s", file_backend.settings->path);
-
+    
+    LOG_INFO("Using %s backend\n", backend_type);
     /* create the server socket */
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {

@@ -2,7 +2,7 @@
 
 #include <sys/uio.h>
 
-inline XXH64_hash_t hash_buf(void* buf, size_t length) {
+static inline XXH64_hash_t hash_buf(void* buf, size_t length) {
     return XXH3_64bits(buf, length);
 }
 
