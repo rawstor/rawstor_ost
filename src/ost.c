@@ -35,11 +35,11 @@ static request_t* req_new(req_kind event, int fd) {
     return req;
 }
 
-inline void req_free(request_t* req) {
+static inline void req_free(request_t* req) {
     memory_pool_free(&request_pool, req);
 }
 
-inline io_request_t* io_req_new(req_kind event, int fd, uint16_t cid) {
+static inline io_request_t* io_req_new(req_kind event, int fd, uint16_t cid) {
     io_request_t* req = (io_request_t*)memory_pool_alloc(&io_request_pool);
     if (!req) {
         FLOG_INFO(stderr, "Failed to allocate io_request from pool\n");
@@ -58,7 +58,7 @@ inline io_request_t* io_req_new(req_kind event, int fd, uint16_t cid) {
     return req;
 }
 
-inline void io_req_free(io_request_t* ioreq) {
+static inline void io_req_free(io_request_t* ioreq) {
     for (int i = 0; i < IO_REQ_IOVECS; i++) {
         LOG_DEBUG("io_req_free: i:%i\n", i);
         if (ioreq->iovecs[i].iov_len > 0 &&
@@ -97,14 +97,13 @@ accept_request_t* accept_req_new(int fd) {
 }
 
 conn_t* setup_conn(int fd) {
-    conn_t* conn = malloc(sizeof(conn_t));
+    conn_t* conn = calloc(1, sizeof(conn_t));
     if (!conn) {
         FLOG_INFO(stderr, "Failed to allocate connection\n");
         return NULL;
     }
     conn->fd = fd;
-    conn->in_bytes = 0;
-    conn->in_buf = malloc(MAX_BUF_SIZE);
+    conn->in_buf = calloc(1, MAX_BUF_SIZE);
     if (!conn->in_buf) {
         FLOG_INFO(stderr, "Failed to allocate connection buffer\n");
         free(conn);
@@ -134,7 +133,7 @@ void close_conn(int fd) {
     conns[fd] = NULL;
 }
 
-inline void
+void
 block_io_req_reuse(io_request_t* ioreq, req_kind event, uint32_t len) {
     ioreq->req.event = event;
 
@@ -146,7 +145,7 @@ block_io_req_reuse(io_request_t* ioreq, req_kind event, uint32_t len) {
     }
 
     if (len > BUFSIZE) {
-        ioreq->iovecs[1].iov_base = malloc(len - BUFSIZE);
+        ioreq->iovecs[1].iov_base = calloc(1, len - BUFSIZE);
         if (ioreq->iovecs[1].iov_base == NULL) {
             FLOG_INFO(stderr, "Failed to allocate memory for large write\n");
             return;
@@ -158,7 +157,7 @@ block_io_req_reuse(io_request_t* ioreq, req_kind event, uint32_t len) {
     }
 }
 
-inline io_request_t*
+io_request_t*
 block_io_req_new(req_kind event, int fd, uint16_t cid, uint32_t len) {
     io_request_t* ioreq = io_req_new(event, fd, cid);
     block_io_req_reuse(ioreq, event, len);
@@ -261,7 +260,7 @@ int push_block_write(conn_t* conn, proto_io_frame_t* frame, void* buf) {
         ioreq->iovecs[0].iov_base = ioreq->iobuf;
         ioreq->iovecs[0].iov_len = frame->len;
         LOG_DEBUG(
-            "[%d]push_block_write: small write, copied %zd bytes to iobuf, "
+            "[%d]push_block_write: small write, copied %u bytes to iobuf, "
             "first byte: 0x%02x\n",
             conn->fd, frame->len, ((unsigned char*)ioreq->iobuf)[0]
         );
@@ -567,7 +566,7 @@ void io_process_write(int fd, int res, io_request_t* ioreq) {
     prep_and_send_resp_frame(fd, CMD_WRITE, ioreq->cid, res);
 }
 
-static int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe) {
+static inline int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe) {
     int ret = 0;
     struct io_uring_sqe* sqe;
 

@@ -69,8 +69,14 @@ static int zfs_backend_open(
     }
     
     // Open the ZFS volume - use a special path for accessing the volume
-    zvol_path = (char*)obj->backend_data;
-    snprintf(zvol_path, 512, "/dev/zvol/%s", dataset_path);
+    // Use a local buffer large enough for /dev/zvol/ + dataset_path
+    char zvol_path_buf[640];
+    snprintf(zvol_path_buf, sizeof(zvol_path_buf), "/dev/zvol/%s", dataset_path);
+    
+    // Copy to backend_data for storage (truncation is acceptable for very long paths)
+    strncpy((char*)obj->backend_data, zvol_path_buf, sizeof(obj->backend_data) - 1);
+    ((char*)obj->backend_data)[sizeof(obj->backend_data) - 1] = '\0';
+    zvol_path = zvol_path_buf;
     
     // Open the volume for reading/writing
     int fd = open(zvol_path, O_RDWR);

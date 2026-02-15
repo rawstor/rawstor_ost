@@ -127,15 +127,6 @@ typedef struct {
 } conn_t;
 
 // Function declarations
-extern inline void req_free(request_t* req);
-extern inline io_request_t* io_req_new(req_kind event, int fd, uint16_t cid);
-extern inline void io_req_free(io_request_t* ioreq);
-extern inline void
-block_io_req_reuse(io_request_t* ioreq, req_kind event, uint32_t len);
-extern inline io_request_t*
-block_io_req_new(req_kind event, int fd, uint16_t cid, uint32_t len);
-
-// Function declarations
 accept_request_t* accept_req_new(int fd);
 conn_t* setup_conn(int fd);
 void close_conn(int fd);
@@ -153,6 +144,5 @@ int process_recv(
 );
 void io_process_read(int fd, int res, io_request_t* ioreq);
 void io_process_write(int fd, int res, io_request_t* ioreq);
-static int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe);
 
 #endif // RAWSTOR_OST_H
