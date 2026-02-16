@@ -53,21 +53,6 @@ static int zfs_backend_open(
         }
     }
     
-    // Verify the volume exists and is a valid ZFS volume
-    snprintf(cmd, sizeof(cmd), "zfs get -H -o value type %s 2>/dev/null", dataset_path);
-    FILE* fp = popen(cmd, "r");
-    if (fp) {
-        char type[32];
-        if (fscanf(fp, "%s", type) == 1) {
-            if (strcmp(type, "volume") != 0) {
-                LOG_ERR("Dataset %s is not a volume\n", dataset_path);
-                pclose(fp);
-                return -1;
-            }
-        }
-        pclose(fp);
-    }
-    
     // Open the ZFS volume - use a special path for accessing the volume
     // Use a local buffer large enough for /dev/zvol/ + dataset_path
     char zvol_path_buf[640];
@@ -79,7 +64,14 @@ static int zfs_backend_open(
     zvol_path = zvol_path_buf;
     
     // Open the volume for reading/writing
+    // There may be a race between `zfs create -s -V` and zvol_path being created
+    // Retry once with 100ms sleep if the first attempt fails
     int fd = open(zvol_path, O_RDWR);
+    if (fd == -1 && errno == ENOENT) {
+        LOG_INFO("ZFS volume %s not ready yet, retrying in 100ms...\n", zvol_path);
+        usleep(100000); // 100ms
+        fd = open(zvol_path, O_RDWR);
+    }
     if (fd == -1) {
         LOG_ERR("Failed to open ZFS volume %s: %s\n", zvol_path, strerror(errno));
         return -1;
@@ -213,13 +205,30 @@ int init_zfs_backend(int argc, char** argv, Backend* backend) {
     }
     
     // Validate that the zpool exists
-    char cmd[256];
+    char cmd[512];
     snprintf(cmd, sizeof(cmd), "zpool list %s > /dev/null 2>&1", 
              backend->settings.zfs.zpool_name);
     if (system(cmd) != 0) {
         LOG_ERR("ZFS pool '%s' not found or not accessible\n", 
                 backend->settings.zfs.zpool_name);
         return 1;
+    }
+    
+    // Validate that the dataset exists (or create it)
+    char dataset_full_path[384];
+    snprintf(dataset_full_path, sizeof(dataset_full_path), "%s/%s",
+             backend->settings.zfs.zpool_name, backend->settings.zfs.dataset_path);
+    
+    snprintf(cmd, sizeof(cmd), "zfs list %s > /dev/null 2>&1", dataset_full_path);
+    if (system(cmd) != 0) {
+        // Dataset doesn't exist, try to create it
+        LOG_INFO("ZFS dataset '%s' not found, attempting to create it...\n", dataset_full_path);
+        snprintf(cmd, sizeof(cmd), "zfs create -p %s", dataset_full_path);
+        if (system(cmd) != 0) {
+            LOG_ERR("Failed to create ZFS dataset '%s'\n", dataset_full_path);
+            return 1;
+        }
+        LOG_INFO("ZFS dataset '%s' created successfully\n", dataset_full_path);
     }
     
     LOG_INFO("ZFS backend initialized with pool: %s, dataset: %s, vol_size: %zu\n",
