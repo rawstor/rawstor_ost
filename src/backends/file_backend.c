@@ -1,6 +1,8 @@
+#define _GNU_SOURCE
 #include "backend.h"
 #include "log.h"
 #include <sys/stat.h>
+#include <fcntl.h>
 
 // Internal file backend functions using unified interface
 
@@ -140,6 +142,21 @@ static int file_backend_allocate(
     return 0;
 }
 
+// Discard (punch hole) a range of the file
+static void file_backend_discard(
+    BackendObject* obj, uint64_t offset, uint64_t len, struct io_uring* ring,
+    void* sqe_data, Backend* backend
+) {
+    (void)backend; // unused
+    
+    // Use io_uring's native async fallocate support (added in Linux 6.2+)
+    // FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE
+    struct io_uring_sqe* sqe = get_sqe(ring);
+    io_uring_prep_fallocate(sqe, obj->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                            obj->data_offset + offset, len);
+    io_uring_sqe_set_data(sqe, sqe_data);
+}
+
 // Initialize file backend
 int init_file_backend(int argc, char** argv, Backend* backend) {
     (void)argc; // argc may be used for additional args in future
@@ -152,6 +169,7 @@ int init_file_backend(int argc, char** argv, Backend* backend) {
     backend->sync = file_backend_sync;
     backend->close = file_backend_close;
     backend->allocate = file_backend_allocate;
+    backend->discard = file_backend_discard;
 
     if (argc < 3) {
         fprintf(stderr, "File backend requires path argument\n");

@@ -1,3 +1,4 @@
+#include "config.h"
 #include "backend.h"
 #include "log.h"
 
@@ -14,6 +15,12 @@
 #include <errno.h>
 #include <libgen.h>
 #include <sys/statvfs.h>
+#include <sys/ioctl.h>
+
+// BLKDISCARD ioctl fallback for older kernels
+#ifndef BLKDISCARD
+#define BLKDISCARD _IO(0x12, 119)
+#endif
 
 // Internal ZFS backend functions using unified interface
 
@@ -159,6 +166,36 @@ static int zfs_backend_allocate(
     return 0;
 }
 
+// Discard (trim) a range of the ZFS volume
+static void zfs_backend_discard(
+    BackendObject* obj, uint64_t offset, uint64_t len, struct io_uring* ring,
+    void* sqe_data, Backend* backend
+) {
+    (void)backend; // unused
+    
+#ifdef HAVE_IORING_PREP_CMD_DISCARD
+    // Use native io_uring async discard (Linux 6.12+)
+    struct io_uring_sqe* sqe = get_sqe(ring);
+    io_uring_prep_cmd_discard(sqe, obj->fd, obj->data_offset + offset, len);
+    io_uring_sqe_set_data(sqe, sqe_data);
+#else
+    // Fallback to synchronous BLKDISCARD ioctl for older kernels
+    uint64_t range[2] = {obj->data_offset + offset, len};
+    int res = ioctl(obj->fd, BLKDISCARD, &range);
+    
+    // Signal completion via NOP - sqe_data will be returned in CQE
+    // Result (success or error) will be in CQE res field
+    struct io_uring_sqe* sqe = get_sqe(ring);
+    if (res == 0) {
+        io_uring_prep_nop(sqe);
+    } else {
+        // Use read with invalid fd to signal error
+        io_uring_prep_read(sqe, -1, NULL, 0, 0);
+    }
+    io_uring_sqe_set_data(sqe, sqe_data);
+#endif
+}
+
 // Check if ZFS is available on the system
 static int check_zfs_available(void) {
     if (system("which zfs > /dev/null 2>&1") != 0) {
@@ -183,6 +220,7 @@ int init_zfs_backend(int argc, char** argv, Backend* backend) {
     backend->sync = zfs_backend_sync;
     backend->close = zfs_backend_close;
     backend->allocate = zfs_backend_allocate;
+    backend->discard = zfs_backend_discard;
     
     // Default settings - use argv[2] as zpool name if provided
     if (argc >= 3) {

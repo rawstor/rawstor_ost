@@ -90,8 +90,8 @@ typedef enum {
     // our block request
     IO_KIND_READ,
     IO_KIND_WRITE,
+    IO_KIND_DISCARD,
     // IO_KIND_FSYNC,
-    // IO_KIND_DISCARD
 } req_kind;
 
 typedef struct {

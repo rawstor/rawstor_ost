@@ -98,6 +98,10 @@ typedef struct Backend {
         BackendObject* obj, size_t size, struct io_uring* ring, void* sqe_data,
         struct Backend* backend
     );
+    void (*discard)(
+        BackendObject* obj, uint64_t offset, uint64_t len, struct io_uring* ring,
+        void* sqe_data, struct Backend* backend
+    );
     // Backend-specific settings
     union {
         FileSettings file;

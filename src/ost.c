@@ -318,6 +318,28 @@ int cmd_process_read(conn_t* conn, int fd, void* data, int len) {
     return 0;
 }
 
+int cmd_process_discard(conn_t* conn, int fd, void* data, int len) {
+    Backend* backend = &g_backend;
+    /* discard (punch hole) a range */
+    io_request_t* nioreq =
+        block_io_req_new(IO_KIND_DISCARD, fd, conn->op->cid, 0);
+    LOG_DEBUG(
+        "[%i]CMD_DISCARD: block_fd:%i cid:%u offset:%li len:%i\n", fd,
+        conn->obj.fd, conn->op->cid, conn->op->offset, conn->op->len
+    );
+    backend->discard(
+        &conn->obj, conn->op->offset, conn->op->len, &ring, nioreq, backend
+    );
+    io_uring_submit(&ring);
+    return 0;
+}
+
+void io_process_discard(int fd, int res, io_request_t* ioreq) {
+    LOG_DEBUG("[%d]block_discard: cid:%u res:%i\n", fd, ioreq->cid, res);
+
+    prep_and_send_resp_frame(fd, CMD_DISCARD, ioreq->cid, res);
+}
+
 int process_recv(
     struct ctx* ctx, struct io_uring_cqe* cqe, int fd, int res,
     io_request_t* ioreq
@@ -440,6 +462,11 @@ int process_recv(
         switch (conn->op->cmd) {
         case CMD_READ: {
             cmd_process_read(conn, fd, data, 0);
+            goto out_free_op;
+            break;
+        }
+        case CMD_DISCARD: {
+            cmd_process_discard(conn, fd, data, 0);
             goto out_free_op;
             break;
         }
@@ -735,6 +762,16 @@ static inline int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe) {
         io_request_t* ioreq = (io_request_t*)cqe->user_data;
 
         io_process_write(fd, res, ioreq);
+        io_req_free(ioreq);
+
+        break;
+    }
+    /* Block discard came back */
+    case IO_KIND_DISCARD: {
+        /* get a handle on the more specialised request */
+        io_request_t* ioreq = (io_request_t*)cqe->user_data;
+
+        io_process_discard(fd, res, ioreq);
         io_req_free(ioreq);
 
         break;
