@@ -31,11 +31,13 @@
 // static const int OFFSET_BYTES = sizeof(uint16_t);
 
 // protocol section
-#define CMD_SET_OBJECT 0
-#define CMD_READ 1
-#define CMD_WRITE 2
-#define CMD_DISCARD 3
-#define CMD_ALLOCATE_OBJ_CHUNK 4
+typedef enum {
+    CMD_SET_OBJECT = 0,
+    CMD_READ = 1,
+    CMD_WRITE = 2,
+    CMD_DISCARD = 3,
+    CMD_ALLOCATE_OBJ_CHUNK = 4,
+} commands_enum_t;
 typedef uint16_t commands_t;
 
 /* Minimal protocol frame (cmd only) */
