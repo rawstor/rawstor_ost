@@ -212,10 +212,12 @@ int push_block_write(conn_t* conn, proto_io_frame_t* frame, void* buf) {
     return 0;
 }
 
-int cmd_process_set_object(conn_t* conn, int fd, void* data, int len) {
+int cmd_process_set_object(
+    conn_t* conn, int fd, uint16_t cid, void* data, int len
+) {
     proto_basic_frame_t* frame = (proto_basic_frame_t*)data;
     int res = set_conn_params(conn, frame);
-    prep_and_send_resp_frame(fd, frame->cmd, 0, res);
+    prep_and_send_resp_frame(fd, frame->cmd, cid, res);
     return 0;
 }
 
@@ -295,7 +297,7 @@ int process_recv(
                     "disconnect.\n",
                     fd, mframe->magic, RAWSTOR_MAGIC
                 );
-                prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
+                prep_and_send_resp_frame(fd, mframe->cmd, mframe->cid, -1);
                 goto error;
             }
 
@@ -304,7 +306,7 @@ int process_recv(
             if (uring_unlikely(
                     !conn->obj.fd && mframe->cmd != CMD_SET_OBJECT
                 )) {
-                prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
+                prep_and_send_resp_frame(fd, mframe->cmd, mframe->cid, -1);
                 goto error;
             }
 
@@ -320,7 +322,7 @@ int process_recv(
                     );
                     goto partial_res;
                 }
-                cmd_process_set_object(conn, fd, fdata, 0);
+                cmd_process_set_object(conn, fd, mframe->cid, fdata, 0);
                 processed_size =
                     sizeof(proto_basic_frame_t) - conn->op_partial_offset;
                 goto next_iter;
