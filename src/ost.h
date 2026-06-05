@@ -31,26 +31,27 @@
 // static const int OFFSET_BYTES = sizeof(uint16_t);
 
 // protocol section
-typedef enum {
-    // IO commands
-    CMD_SET_OBJECT,
-    CMD_READ,
-    CMD_WRITE,
-    CMD_DISCARD,
-    // control commands
-    CMD_ALLOCATE_OBJ_CHUNK,
-} commands_t;
+enum {
+    CMD_SET_OBJECT = 0,
+    CMD_READ = 1,
+    CMD_WRITE = 2,
+    CMD_DISCARD = 3,
+    CMD_ALLOCATE_OBJ_CHUNK = 4,
+};
+typedef uint16_t commands_t;
 
 /* Minimal protocol frame (cmd only) */
 typedef struct {
     uint32_t magic;
     commands_t cmd;
+    uint16_t cid;
 } __attribute__((packed)) proto_min_frame_t;
 
 /* Basic protocol frame */
 typedef struct {
     uint32_t magic;
     commands_t cmd;
+    uint16_t cid;
     // var is for minimal commands only, will be overridden in other command
     // structs
     uint8_t obj_id[OBJID_LEN];

@@ -215,7 +215,7 @@ int push_block_write(conn_t* conn, proto_io_frame_t* frame, void* buf) {
 int cmd_process_set_object(conn_t* conn, int fd, void* data, int len) {
     proto_basic_frame_t* frame = (proto_basic_frame_t*)data;
     int res = set_conn_params(conn, frame);
-    prep_and_send_resp_frame(fd, frame->cmd, 0, res);
+    prep_and_send_resp_frame(fd, frame->cmd, frame->cid, res);
     return 0;
 }
 
@@ -295,7 +295,7 @@ int process_recv(
                     "disconnect.\n",
                     fd, mframe->magic, RAWSTOR_MAGIC
                 );
-                prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
+                prep_and_send_resp_frame(fd, mframe->cmd, mframe->cid, -1);
                 goto error;
             }
 
@@ -304,7 +304,7 @@ int process_recv(
             if (uring_unlikely(
                     !conn->obj.fd && mframe->cmd != CMD_SET_OBJECT
                 )) {
-                prep_and_send_resp_frame(fd, mframe->cmd, 0, -1);
+                prep_and_send_resp_frame(fd, mframe->cmd, mframe->cid, -1);
                 goto error;
             }
 
