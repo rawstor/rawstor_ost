@@ -1,10 +1,12 @@
 #include "ost.h"
 #include "hash.h"
 #include "log.h"
+#include "memory_pool.h"
 #include "ruring.h"
 
 #include <errno.h>
 #include <netinet/tcp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +15,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/* Global backend instance */
+static Backend g_backend;
+
 /* Cheapest storage for our connections */
 conn_t* conns[NUM_CONNS];
 struct io_uring ring;
@@ -20,52 +25,90 @@ int server_fd;
 
 /* minimal request */
 static request_t* req_new(req_kind event, int fd) {
-    request_t* req = malloc(sizeof(request_t));
+    request_t* req = (request_t*)memory_pool_alloc(&request_pool);
+    if (!req) {
+        FLOG_INFO(stderr, "Failed to allocate request from pool\n");
+        return NULL;
+    }
     req->event = event;
     req->fd = fd;
     return req;
 }
 
-inline void req_free(request_t* req) {
-    free(req);
+static inline void req_free(request_t* req) {
+    memory_pool_free(&request_pool, req);
 }
 
-inline io_request_t* io_req_new(req_kind event, int fd, uint16_t cid) {
-    io_request_t* req = malloc(sizeof(io_request_t));
+static inline io_request_t* io_req_new(req_kind event, int fd, uint16_t cid) {
+    io_request_t* req = (io_request_t*)memory_pool_alloc(&io_request_pool);
+    if (!req) {
+        FLOG_INFO(stderr, "Failed to allocate io_request from pool\n");
+        return NULL;
+    }
     req->req.event = event;
     req->req.fd = fd;
     req->iovecs[0].iov_base = req->iobuf;
     req->iovecs[0].iov_len = sizeof(req->iobuf);
+    req->iovecs[1].iov_base = NULL;
     req->iovecs[1].iov_len = 0;
+    req->iovecs[2].iov_base = NULL;
     req->iovecs[2].iov_len = 0;
     req->cid = cid;
+    req->proto_frame = NULL;
     return req;
 }
 
-inline void io_req_free(io_request_t* ioreq) {
+static inline void io_req_free(io_request_t* ioreq) {
     for (int i = 0; i < IO_REQ_IOVECS; i++) {
         LOG_DEBUG("io_req_free: i:%i\n", i);
         if (ioreq->iovecs[i].iov_len > 0 &&
             ioreq->iovecs[i].iov_base != (void*)ioreq->iobuf) {
-            free(ioreq->iovecs[i].iov_base);
+            // Check if this iovec contains a protocol frame
+            if (ioreq->iovecs[i].iov_len == sizeof(proto_resp_frame_t)) {
+                // This is a protocol frame, return it to the pool
+                memory_pool_free(&proto_frame_pool, ioreq->iovecs[i].iov_base);
+            } else {
+                // This is an additional buffer allocated for large writes
+                free(ioreq->iovecs[i].iov_base);
+            }
+            ioreq->iovecs[i].iov_base = NULL;
+            ioreq->iovecs[i].iov_len = 0;
         }
     }
-    free(ioreq);
+    // Free protocol frame if it was allocated separately
+    if (ioreq->proto_frame) {
+        memory_pool_free(&proto_frame_pool, ioreq->proto_frame);
+        ioreq->proto_frame = NULL;
+    }
+    memory_pool_free(&io_request_pool, ioreq);
 }
 
-static accept_request_t* accept_req_new(int fd) {
-    accept_request_t* req = malloc(sizeof(accept_request_t));
+accept_request_t* accept_req_new(int fd) {
+    accept_request_t* req =
+        (accept_request_t*)memory_pool_alloc(&accept_request_pool);
+    if (!req) {
+        FLOG_INFO(stderr, "Failed to allocate accept_request from pool\n");
+        return NULL;
+    }
     req->req.event = REQ_KIND_ACCEPT;
     req->req.fd = fd;
     req->addrlen = sizeof(req->addr);
     return req;
 }
 
-static conn_t* setup_conn(int fd) {
-    conn_t* conn = malloc(sizeof(conn_t));
+conn_t* setup_conn(int fd) {
+    conn_t* conn = calloc(1, sizeof(conn_t));
+    if (!conn) {
+        FLOG_INFO(stderr, "Failed to allocate connection\n");
+        return NULL;
+    }
     conn->fd = fd;
-    conn->in_bytes = 0;
-    conn->in_buf = malloc(MAX_BUF_SIZE);
+    conn->in_buf = calloc(1, MAX_BUF_SIZE);
+    if (!conn->in_buf) {
+        FLOG_INFO(stderr, "Failed to allocate connection buffer\n");
+        free(conn);
+        return NULL;
+    }
     conn->op = NULL;
     conn->op_partial_offset = 0;
     return conn;
@@ -90,27 +133,45 @@ void close_conn(int fd) {
     conns[fd] = NULL;
 }
 
-inline void
+void
 block_io_req_reuse(io_request_t* ioreq, req_kind event, uint32_t len) {
     ioreq->req.event = event;
+
+    // Free any previously allocated memory in iovec[1]
+    if (ioreq->iovecs[1].iov_base != NULL && ioreq->iovecs[1].iov_len > 0) {
+        free(ioreq->iovecs[1].iov_base);
+        ioreq->iovecs[1].iov_base = NULL;
+        ioreq->iovecs[1].iov_len = 0;
+    }
+
     if (len > BUFSIZE) {
-        ioreq->iovecs[1].iov_base = malloc(len - BUFSIZE);
+        ioreq->iovecs[1].iov_base = calloc(1, len - BUFSIZE);
+        if (ioreq->iovecs[1].iov_base == NULL) {
+            FLOG_INFO(stderr, "Failed to allocate memory for large write\n");
+            return;
+        }
         ioreq->iovecs[1].iov_len = len - BUFSIZE;
     } else {
+        ioreq->iovecs[0].iov_base = ioreq->iobuf;
         ioreq->iovecs[0].iov_len = len;
     }
 }
 
-inline io_request_t*
+io_request_t*
 block_io_req_new(req_kind event, int fd, uint16_t cid, uint32_t len) {
     io_request_t* ioreq = io_req_new(event, fd, cid);
     block_io_req_reuse(ioreq, event, len);
     return ioreq;
 }
 
-static proto_resp_frame_t*
+proto_resp_frame_t*
 prep_resp_frame(commands_t cmd, uint16_t cid, int res, XXH64_hash_t hash) {
-    proto_resp_frame_t* rframe = malloc(sizeof(proto_resp_frame_t));
+    proto_resp_frame_t* rframe =
+        (proto_resp_frame_t*)memory_pool_alloc(&proto_frame_pool);
+    if (!rframe) {
+        FLOG_INFO(stderr, "Failed to allocate proto_resp_frame from pool\n");
+        return NULL;
+    }
     rframe->magic = RAWSTOR_MAGIC;
     rframe->cmd = cmd;
     rframe->cid = cid;
@@ -119,8 +180,7 @@ prep_resp_frame(commands_t cmd, uint16_t cid, int res, XXH64_hash_t hash) {
     return rframe;
 }
 
-static void
-prep_and_send_resp_frame(int fd, commands_t cmd, uint16_t cid, int res) {
+void prep_and_send_resp_frame(int fd, commands_t cmd, uint16_t cid, int res) {
     proto_resp_frame_t* rframe = prep_resp_frame(cmd, cid, res, 0);
 
     io_request_t* wreq = io_req_new(REQ_KIND_WRITE, fd, cid);
@@ -133,23 +193,23 @@ prep_and_send_resp_frame(int fd, commands_t cmd, uint16_t cid, int res) {
     );
     io_uring_sqe_set_data(sqe, wreq);
     io_uring_submit(&ring);
-
-    // free(rframe);
 }
 
-static int set_conn_params(conn_t* c, proto_basic_frame_t* frame) {
+int set_conn_params(conn_t* c, proto_basic_frame_t* frame) {
     conn_t* conn = c;
+    Backend* backend = &g_backend;
+    
     // TODO: validate incoming frame and objid
     if (conn->obj.fd) {
-        file_backend.close(&conn->obj, &ring, NULL, NULL);
+        backend->close(&conn->obj, &ring, NULL, backend);
     }
     // TODO: set valid len
     memcpy(conn->obj.id.bytes, frame->obj_id, sizeof(conn->obj.id.bytes));
-    conn->obj = file_backend.init(&conn->obj.id, NULL);
+    conn->obj = backend->init(&conn->obj.id, backend);
     rawstor_uuid_string uuid_str;
     rawstor_uuid_to_string(&conn->obj.id, &uuid_str);
     LOG_INFO("[%i]Set connection objid: %s\n", conn->fd, uuid_str);
-    int res = file_backend.open(&conn->obj, &ring, NULL, file_backend.settings);
+    int res = backend->open(&conn->obj, &ring, NULL, backend);
     if (res) {
         perror("open");
         close_conn(conn->fd);
@@ -179,6 +239,7 @@ int buffer_in_stream(
 }
 
 int push_block_write(conn_t* conn, proto_io_frame_t* frame, void* buf) {
+    Backend* backend = &g_backend;
     XXH64_hash_t hash = hash_buf(buf, frame->len);
 
     if (frame->hash != hash) {
@@ -192,20 +253,41 @@ int push_block_write(conn_t* conn, proto_io_frame_t* frame, void* buf) {
 
     io_request_t* ioreq =
         block_io_req_new(IO_KIND_WRITE, conn->fd, frame->cid, frame->len);
-    // TODO: optimize memcpy?
-    char* nbuf = malloc(frame->len);
-    memcpy(nbuf, buf, frame->len);
-    ioreq->iovecs[0].iov_base = nbuf;
-    ioreq->iovecs[0].iov_len = frame->len;
+
+    // Copy data to the iovec buffers that were allocated by block_io_req_reuse
+    if (frame->len <= BUFSIZE) {
+        memcpy(ioreq->iobuf, buf, frame->len);
+        ioreq->iovecs[0].iov_base = ioreq->iobuf;
+        ioreq->iovecs[0].iov_len = frame->len;
+        LOG_DEBUG(
+            "[%d]push_block_write: small write, copied %u bytes to iobuf, "
+            "first byte: 0x%02x\n",
+            conn->fd, frame->len, ((unsigned char*)ioreq->iobuf)[0]
+        );
+    } else {
+        // For larger writes, copy data to the buffer allocated by
+        // block_io_req_reuse
+        memcpy(ioreq->iobuf, buf, BUFSIZE);
+        memcpy(
+            ioreq->iovecs[1].iov_base, (char*)buf + BUFSIZE,
+            frame->len - BUFSIZE
+        );
+        LOG_DEBUG(
+            "[%d]push_block_write: large write, copied %zd bytes to iobuf and "
+            "%zd bytes to additional buffer\n",
+            conn->fd, BUFSIZE, frame->len - BUFSIZE
+        );
+    }
+
     LOG_DEBUG(
         "[%i]push_block_write: block_fd:%i cid:%u offset:%li len:%i, sync:%i\n",
         conn->fd, conn->obj.fd, conn->op->cid, frame->offset, frame->len,
         frame->sync
     );
 
-    file_backend.writev(
-        &conn->obj, ioreq->iovecs, 1, frame->offset, frame->sync, &ring, ioreq,
-        file_backend.settings
+    backend->writev(
+        &conn->obj, ioreq->iovecs, (frame->len <= BUFSIZE) ? 1 : 2,
+        frame->offset, frame->sync, &ring, ioreq, backend
     );
     io_uring_submit(&ring);
 
@@ -220,6 +302,7 @@ int cmd_process_set_object(conn_t* conn, int fd, void* data, int len) {
 }
 
 int cmd_process_read(conn_t* conn, int fd, void* data, int len) {
+    Backend* backend = &g_backend;
     /* async read object */
     io_request_t* nioreq =
         block_io_req_new(IO_KIND_READ, fd, conn->op->cid, conn->op->len);
@@ -227,12 +310,34 @@ int cmd_process_read(conn_t* conn, int fd, void* data, int len) {
         "[%i]CMD_READ: block_fd:%i cid:%u offset:%li len:%i\n", fd,
         conn->obj.fd, conn->op->cid, conn->op->offset, conn->op->len
     );
-    file_backend.readv(
+    backend->readv(
         &conn->obj, nioreq->iovecs, 2, conn->op->offset, &ring, nioreq,
-        file_backend.settings
+        backend
     );
     io_uring_submit(&ring);
     return 0;
+}
+
+int cmd_process_discard(conn_t* conn, int fd, void* data, int len) {
+    Backend* backend = &g_backend;
+    /* discard (punch hole) a range */
+    io_request_t* nioreq =
+        block_io_req_new(IO_KIND_DISCARD, fd, conn->op->cid, 0);
+    LOG_DEBUG(
+        "[%i]CMD_DISCARD: block_fd:%i cid:%u offset:%li len:%i\n", fd,
+        conn->obj.fd, conn->op->cid, conn->op->offset, conn->op->len
+    );
+    backend->discard(
+        &conn->obj, conn->op->offset, conn->op->len, &ring, nioreq, backend
+    );
+    io_uring_submit(&ring);
+    return 0;
+}
+
+void io_process_discard(int fd, int res, io_request_t* ioreq) {
+    LOG_DEBUG("[%d]block_discard: cid:%u res:%i\n", fd, ioreq->cid, res);
+
+    prep_and_send_resp_frame(fd, CMD_DISCARD, ioreq->cid, res);
 }
 
 int process_recv(
@@ -360,6 +465,11 @@ int process_recv(
             goto out_free_op;
             break;
         }
+        case CMD_DISCARD: {
+            cmd_process_discard(conn, fd, data, 0);
+            goto out_free_op;
+            break;
+        }
         case CMD_WRITE: {
             /* Fast path, when full data is already here */
             if (conn->in_bytes == 0 && res >= conn->op->len) {
@@ -445,25 +555,34 @@ void io_process_read(int fd, int res, io_request_t* ioreq) {
         hash
     );
 
-    // Reuse ioreq to minimize allocations
-    ioreq->req.event = REQ_KIND_WRITE;
     // Add space for resp frame before data
-    // memmove(&ioreq->iovecs[1], &ioreq->iovecs[0], 2*sizeof(struct iovec));
     ioreq->iovecs[2] = ioreq->iovecs[1];
     ioreq->iovecs[1] = ioreq->iovecs[0];
 
+    // Create response frame
     proto_resp_frame_t* rframe =
         prep_resp_frame(CMD_READ, ioreq->cid, res, hash);
     ioreq->iovecs[0].iov_base = rframe;
     ioreq->iovecs[0].iov_len = sizeof(proto_resp_frame_t);
 
-    struct msghdr msg = {.msg_iov = ioreq->iovecs, .msg_iovlen = 3};
+    // Initialize msghdr in the request object (persistent memory)
+    memset(&ioreq->msg, 0, sizeof(ioreq->msg));
+    ioreq->msg.msg_iov = ioreq->iovecs;
+    ioreq->msg.msg_iovlen = 3;
+    ioreq->msg.msg_name = NULL;
+    ioreq->msg.msg_namelen = 0;
+    ioreq->msg.msg_control = NULL;
+    ioreq->msg.msg_controllen = 0;
+    ioreq->msg.msg_flags = 0;
+
+    // Change event type to avoid recursion and trigger cleanup
+    ioreq->req.event = REQ_KIND_WRITE;
 
     struct io_uring_sqe* sqe = get_sqe(&ring);
     /* Don't use MSG_WAITALL, because with many simultaneous
        io_uring_prep_sendmsg() inflight SQEs we may get mixed-up responses
        */
-    io_uring_prep_sendmsg(sqe, fd, &msg, MSG_NOSIGNAL); // MSG_WAITALL |
+    io_uring_prep_sendmsg(sqe, fd, &ioreq->msg, MSG_NOSIGNAL); // MSG_WAITALL |
     io_uring_sqe_set_data(sqe, ioreq);
     io_uring_submit(&ring);
 }
@@ -474,7 +593,7 @@ void io_process_write(int fd, int res, io_request_t* ioreq) {
     prep_and_send_resp_frame(fd, CMD_WRITE, ioreq->cid, res);
 }
 
-static int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe) {
+static inline int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe) {
     int ret = 0;
     struct io_uring_sqe* sqe;
 
@@ -647,6 +766,16 @@ static int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe) {
 
         break;
     }
+    /* Block discard came back */
+    case IO_KIND_DISCARD: {
+        /* get a handle on the more specialised request */
+        io_request_t* ioreq = (io_request_t*)cqe->user_data;
+
+        io_process_discard(fd, res, ioreq);
+        io_req_free(ioreq);
+
+        break;
+    }
     default: {
         FLOG_INFO(
             stderr,
@@ -659,11 +788,21 @@ static int handle_cqe(struct ctx* ctx, struct io_uring_cqe* cqe) {
     return ret;
 }
 
+// Parse --backend argument from command line
+static const char* parse_backend_arg(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--backend=", 10) == 0) {
+            return argv[i] + 10; // Return pointer to value after "--backend="
+        }
+    }
+    return "file"; // Default to file backend
+}
+
 int main(int argc, char** argv) {
     int ret;
 
     if (argc < 3) {
-        printf("usage: %s <port> <path_to_objdir>\n", argv[0]);
+        printf("usage: %s <port> <path_or_zpool> [--backend=file|zfs] [--zpool=<name>] [--dataset=<path>] [--vol-size=<size>]\n", argv[0]);
         exit(1);
     }
 
@@ -673,21 +812,47 @@ int main(int argc, char** argv) {
         exit(1);
     }
 
+    // Initialize memory pools
+    if (init_memory_pools() != 0) {
+        printf("Memory pool initialization failed!\n");
+        exit(1);
+    }
+
     // Client may not be interested in our data, ignore signal and handle write
     // errors explicitly
     signal(SIGPIPE, SIG_IGN);
 
-    if (init_file_backend(argc, argv)) {
-        printf("Backend init error!\n");
+    // Parse backend type from arguments
+    const char* backend_type = parse_backend_arg(argc, argv);
+    
+    // Initialize the selected backend
+    if (strcmp(backend_type, "zfs") == 0) {
+        LOG_INFO("Initializing ZFS backend...\n");
+        if (init_zfs_backend(argc, argv, &g_backend) != 0) {
+            printf("ZFS backend initialization failed!\n");
+            cleanup_memory_pools();
+            exit(1);
+        }
+    } else if (strcmp(backend_type, "file") == 0) {
+        LOG_INFO("Initializing file backend...\n");
+        if (init_file_backend(argc, argv, &g_backend) != 0) {
+            printf("File backend initialization failed!\n");
+            cleanup_memory_pools();
+            exit(1);
+        }
+    } else {
+        printf("Unknown backend type: %s\n", backend_type);
+        printf("Supported backends: file, zfs\n");
+        cleanup_memory_pools();
         exit(1);
     }
-
-    printf("%s", file_backend.settings->path);
-
+    
+    LOG_INFO("Using %s backend\n", backend_type);
     /* create the server socket */
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         perror("socket");
+        cleanup_memory_pools();
         exit(1);
     }
 
@@ -806,11 +971,7 @@ int main(int argc, char** argv) {
         }
 
         io_uring_submit(&ring);
-        advance_recycled_buffers(&ctx);
-
-        if (i) {
-            io_uring_cq_advance(&ring, i);
-        }
+        advance_recycled_buffers_and_cqes(&ctx, i);
 
         LOG_DEBUG(
             "Main_loop: processed %i cqes via io_uring_for_each_cqe\n", i
@@ -821,6 +982,7 @@ int main(int argc, char** argv) {
          * process them in next loop */
         if (io_uring_wait_cqe(&ring, &cqe) < 0) {
             perror("io_uring_wait_cqe");
+            cleanup_memory_pools();
             exit(1);
         }
     }

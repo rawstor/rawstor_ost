@@ -24,12 +24,15 @@ void recycle_buffer(struct ctx* ctx, int idx) {
     );
 }
 
-inline void advance_recycled_buffers(struct ctx* ctx) {
-    if (ctx->recycled_buffers) {
+inline void advance_recycled_buffers_and_cqes(struct ctx* ctx, int cnum) {
+    if (ctx->recycled_buffers || cnum) {
         LOG_DEBUG(
-            "advance_recycled_buffers: %i buffers\n", ctx->recycled_buffers
+            "advance_recycled_buffers_and_cqes: %i buffers %i cqes\n",
+            ctx->recycled_buffers, cnum
         );
-        io_uring_buf_ring_advance(ctx->buf_ring, ctx->recycled_buffers);
+        __io_uring_buf_ring_cq_advance(
+            ctx->ring, ctx->buf_ring, cnum, ctx->recycled_buffers
+        );
         ctx->recycled_buffers = 0;
     }
 }
@@ -45,7 +48,10 @@ int setup_buffer_pool(struct ctx* ctx) {
         (sizeof(struct io_uring_buf) + buffer_size(ctx)) * BUFFERS;
     mapped = mmap(
         NULL, ctx->buf_ring_size, PROT_READ | PROT_WRITE,
-        MAP_ANONYMOUS | MAP_PRIVATE, 0, 0
+        MAP_ANONYMOUS |
+            MAP_PRIVATE //| MAP_HUGETLB | MAP_HUGE_2MB //MAP_HUGE_1GB
+        ,
+        -1, 0
     );
     if (mapped == MAP_FAILED) {
         fprintf(stderr, "buf_ring mmap: %s\n", strerror(errno));
@@ -92,7 +98,7 @@ int setup_context(struct ctx* ctx) {
 
     memset(&params, 0, sizeof(params));
     params.cq_entries = CQES;
-    params.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_COOP_TASKRUN |
+    params.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_DEFER_TASKRUN |
                    IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER;
 
     ret = io_uring_queue_init_params(CQES, ctx->ring, &params);

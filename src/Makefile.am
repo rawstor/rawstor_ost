@@ -15,8 +15,11 @@ ost_SOURCES = hash.c \
               ruring.h \
               uuid.c \
               uuid.h \
-              backends/file.c \
-              backends/file.h
+              memory_pool.c \
+              memory_pool.h \
+              backends/backend.h \
+              backends/file_backend.c \
+              backends/zfs_backend.c
 
 ost_LDADD = $(LIBXXHASH_LIBS) \
             $(LIBURING_LIBS)
